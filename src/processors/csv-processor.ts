@@ -1,9 +1,7 @@
 import Papa from 'papaparse';
 import {
   Job,
-  Upload,
   JobResult,
-  ProcessedConnection,
   WorkerError,
   ValidationError
 } from '../types';
@@ -125,7 +123,8 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
 
       } catch (batchError) {
         console.error(`❌ Batch ${batchNumber} failed:`, batchError);
-        throw new WorkerError(`Batch processing failed: ${batchError.message}`, 'BATCH_ERROR', job.id, job.upload_id);
+        const errorMessage = batchError instanceof Error ? batchError.message : String(batchError);
+        throw new WorkerError(`Batch processing failed: ${errorMessage}`, 'BATCH_ERROR', job.id, job.upload_id);
       }
     }
 
@@ -157,12 +156,14 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
     const duration = Date.now() - startTime;
     console.error(`❌ CSV processing failed after ${duration}ms:`, error);
 
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
     try {
       // Mark upload as failed
-      await updateUploadStatus(job.upload_id, 'failed', null, error.message);
+      await updateUploadStatus(job.upload_id, 'failed', null, errorMessage);
 
       // Mark job as failed with retry logic
-      const failureResult = await markJobFailed(job.id, error.message);
+      const failureResult = await markJobFailed(job.id, errorMessage);
 
       if (failureResult.willRetry) {
         console.log(`🔄 Job will be retried (attempt ${failureResult.attempts})`);
@@ -179,7 +180,7 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
       processedRecords: 0,
       duplicateRecords: 0,
       totalRecords: 0,
-      error: error.message
+      error: errorMessage
     };
 
   } finally {

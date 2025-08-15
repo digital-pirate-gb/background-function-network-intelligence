@@ -141,14 +141,23 @@ export async function getJobStats(): Promise<Array<{ status: JobStatus; count: n
   try {
     const { data, error } = await supabase
       .from('jobs')
-      .select('status, count(*)')
-      .group('status');
+      .select('status')
+      .order('status');
 
     if (error) {
       throw new DatabaseError(`Failed to get job stats: ${error.message}`);
     }
 
-    return data || [];
+    // Group by status manually since Supabase client doesn't support GROUP BY
+    const stats: Record<string, number> = {};
+    data?.forEach(job => {
+      stats[job.status] = (stats[job.status] || 0) + 1;
+    });
+
+    return Object.entries(stats).map(([status, count]) => ({
+      status: status as JobStatus,
+      count
+    }));
   } catch (error) {
     console.error('Error getting job stats:', error);
     return [];
@@ -163,9 +172,9 @@ export async function cleanupOldJobs(daysOld: number = 7): Promise<number> {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - daysOld);
 
-    const { data, error } = await supabase
+    const { count, error } = await supabase
       .from('jobs')
-      .delete()
+      .delete({ count: 'exact' })
       .in('status', ['succeeded', 'failed'])
       .lt('updated_at', cutoffDate.toISOString());
 
@@ -173,7 +182,7 @@ export async function cleanupOldJobs(daysOld: number = 7): Promise<number> {
       throw new DatabaseError(`Failed to cleanup old jobs: ${error.message}`);
     }
 
-    return data?.length || 0;
+    return count || 0;
   } catch (error) {
     console.error('Error cleaning up old jobs:', error);
     return 0;

@@ -29,7 +29,7 @@ export const supabase: SupabaseClient = createClient(
 // Test connection on startup
 export async function testConnection(): Promise<void> {
   try {
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('uploads')
       .select('count')
       .limit(1);
