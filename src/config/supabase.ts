@@ -8,6 +8,7 @@ if (!process.env.SUPABASE_URL) {
   throw new Error('Missing environment variable: SUPABASE_URL');
 }
 
+
 if (!process.env.SUPABASE_SERVICE_KEY) {
   throw new Error('Missing environment variable: SUPABASE_SERVICE_KEY');
 }
@@ -25,7 +26,6 @@ export const supabase: SupabaseClient = createClient(
     }
   }
 );
-
 // Test connection on startup
 export async function testConnection(): Promise<void> {
   try {

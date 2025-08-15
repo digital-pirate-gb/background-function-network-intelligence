@@ -24,10 +24,46 @@ export async function getNextJob(jobType: JobType = 'csv_process'): Promise<Job 
       throw new DatabaseError(`Failed to get next job: ${error.message}`);
     }
 
+    // If RPC returns a row with all null values, treat it as no job available
+    if (data && data.id === null) {
+      return null;
+    }
+
     return data;
   } catch (error) {
     console.error('Error getting next job:', error);
-    throw error;
+    
+    // Fallback: Try direct query if RPC fails or doesn't exist
+    console.log('🔄 Falling back to direct job query...');
+    try {
+      const { data: jobs, error: queryError } = await supabase
+        .from('jobs')
+        .select('*')
+        .eq('type', jobType)
+        .eq('status', 'queued')
+        .order('created_at', { ascending: true })
+        .limit(1);
+
+      if (queryError) {
+        throw new DatabaseError(`Fallback job query failed: ${queryError.message}`);
+      }
+
+      if (!jobs || jobs.length === 0) {
+        console.log('📭 No queued jobs found in database');
+        return null;
+      }
+
+      const job = jobs[0];
+      console.log(`📋 Found queued job via direct query: ${job.id}`);
+
+      // Update job status to running (since RPC would have done this)
+      await updateJobProgress(job.id, 'running', 0, null, true);
+
+      return job;
+    } catch (fallbackError) {
+      console.error('Fallback job query also failed:', fallbackError);
+      throw error; // Throw original error
+    }
   }
 }
 
@@ -131,6 +167,49 @@ export async function batchInsertConnections(connections: ProcessedConnection[])
   } catch (error) {
     console.error('Error inserting connections batch:', error);
     throw error;
+  }
+}
+
+/**
+ * Debug: Check what jobs exist in the database
+ */
+export async function debugJobsTable(): Promise<void> {
+  try {
+    console.log('🔍 Debugging jobs table...');
+    
+    const { data: allJobs, error } = await supabase
+      .from('jobs')
+      .select('id, upload_id, type, status, attempts, created_at')
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (error) {
+      console.error('❌ Debug query failed:', error);
+      return;
+    }
+
+    console.log(`📊 Found ${allJobs?.length || 0} total jobs (latest 10):`);
+    if (allJobs && allJobs.length > 0) {
+      allJobs.forEach(job => {
+        console.log(`  - ${job.id}: ${job.type} | ${job.status} | ${job.attempts} attempts | ${job.created_at}`);
+      });
+    } else {
+      console.log('📭 No jobs found in jobs table');
+    }
+
+    // Check specifically for queued csv_process jobs
+    const { data: queuedJobs, error: queuedError } = await supabase
+      .from('jobs')
+      .select('*')
+      .eq('type', 'csv_process')
+      .eq('status', 'queued');
+
+    if (!queuedError && queuedJobs) {
+      console.log(`🎯 Found ${queuedJobs.length} queued csv_process jobs`);
+    }
+
+  } catch (error) {
+    console.error('Debug jobs table error:', error);
   }
 }
 

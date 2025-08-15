@@ -151,7 +151,8 @@ export async function cleanupUploadChunks(uploadId: string): Promise<void> {
 export async function getStorageBucketInfo(): Promise<{ name: string; public: boolean; file_size_limit?: number }> {
   try {
     const { data: buckets, error } = await supabase.storage.listBuckets();
-
+    console.log('Listing storage buckets...');
+    console.log(buckets);
     if (error) {
       throw new StorageError(`Failed to list buckets: ${error.message}`);
     }
