@@ -3,15 +3,17 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.config = void 0;
+exports.config = exports.getWorkerHealth = void 0;
 exports.startWorker = startWorker;
 exports.gracefulShutdown = gracefulShutdown;
-exports.getWorkerHealth = getWorkerHealth;
 const dotenv_1 = __importDefault(require("dotenv"));
 const supabase_1 = require("./config/supabase");
 const storage_1 = require("./utils/storage");
 const database_1 = require("./utils/database");
 const csv_processor_1 = require("./processors/csv-processor");
+const health_server_1 = require("./monitoring/health-server");
+const worker_state_1 = require("./monitoring/worker-state");
+Object.defineProperty(exports, "getWorkerHealth", { enumerable: true, get: function () { return worker_state_1.getWorkerHealth; } });
 const types_1 = require("./types");
 dotenv_1.default.config();
 const config = {
@@ -23,31 +25,27 @@ const config = {
     chunkSize: parseInt(process.env.CHUNK_SIZE || '5242880')
 };
 exports.config = config;
-let isRunning = false;
-let isShuttingDown = false;
-let currentJob = null;
-let jobsProcessed = 0;
 let lastCleanup = Date.now();
 async function workerLoop() {
     console.log('🔄 Starting worker loop...');
-    while (isRunning && !isShuttingDown) {
+    while ((0, worker_state_1.getWorkerHealth)().status === 'running' && !(0, worker_state_1.getWorkerHealth)().isShuttingDown) {
         try {
             const job = await (0, database_1.getNextJob)('csv_process');
             if (job) {
-                currentJob = job;
+                (0, worker_state_1.setCurrentJob)(job);
                 console.log(`📋 Picked up job ${job.id} for upload ${job.upload_id}`);
                 try {
                     (0, csv_processor_1.validateJob)(job);
                     const result = await (0, csv_processor_1.processCSVJob)(job);
                     console.log(`✅ Job ${job.id} completed: ${(0, csv_processor_1.getProcessingStats)(result)}`);
-                    jobsProcessed++;
+                    (0, worker_state_1.incrementJobsProcessed)();
                 }
                 catch (jobError) {
                     const error = jobError;
                     console.error(`❌ Job ${job.id} failed:`, error.message);
                 }
                 finally {
-                    currentJob = null;
+                    (0, worker_state_1.setCurrentJob)(null);
                 }
             }
             else {
@@ -83,19 +81,20 @@ async function performCleanup() {
 }
 async function gracefulShutdown(signal) {
     console.log(`\n🛑 Received ${signal}, starting graceful shutdown...`);
-    isShuttingDown = true;
+    (0, worker_state_1.setWorkerShuttingDown)(true);
+    const currentJob = (0, worker_state_1.getWorkerHealth)().currentJob;
     if (currentJob) {
         console.log(`⏳ Waiting for current job ${currentJob.id} to complete...`);
         const shutdownTimeout = 300000;
         const startTime = Date.now();
-        while (currentJob && (Date.now() - startTime) < shutdownTimeout) {
+        while ((0, worker_state_1.getWorkerHealth)().currentJob && (Date.now() - startTime) < shutdownTimeout) {
             await sleep(1000);
         }
-        if (currentJob) {
-            console.log(`⚠️ Shutdown timeout reached, current job ${currentJob.id} may be incomplete`);
+        if ((0, worker_state_1.getWorkerHealth)().currentJob) {
+            console.log(`⚠️ Shutdown timeout reached, current job ${(0, worker_state_1.getWorkerHealth)().currentJob.id} may be incomplete`);
         }
     }
-    isRunning = false;
+    (0, worker_state_1.setWorkerRunning)(false);
     console.log('✅ Graceful shutdown completed');
     process.exit(0);
 }
@@ -116,10 +115,15 @@ async function startWorker() {
         if (!storageOk) {
             throw new types_1.WorkerError('Storage connection test failed', 'STORAGE_CONNECTION_ERROR');
         }
+        console.log('🏥 Starting health monitoring server...');
+        await (0, health_server_1.startHealthServer)();
+        console.log('📊 Starting health logging...');
+        (0, health_server_1.startHealthLogging)();
+        (0, worker_state_1.setWorkerConfig)(config);
         process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
         process.on('SIGINT', () => gracefulShutdown('SIGINT'));
         process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2'));
-        isRunning = true;
+        (0, worker_state_1.setWorkerRunning)(true);
         console.log('✅ Worker initialized successfully');
         console.log('🔄 Starting job processing...');
         await workerLoop();
@@ -132,25 +136,6 @@ async function startWorker() {
 }
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-function getWorkerHealth() {
-    return {
-        status: isRunning ? 'running' : 'stopped',
-        isShuttingDown,
-        currentJob: currentJob ? {
-            id: currentJob.id,
-            uploadId: currentJob.upload_id,
-            startedAt: currentJob.updated_at
-        } : null,
-        jobsProcessed,
-        uptime: process.uptime(),
-        memoryUsage: process.memoryUsage(),
-        config: {
-            pollInterval: config.pollInterval,
-            batchSize: config.batchSize,
-            maxRetries: config.maxRetries
-        }
-    };
 }
 if (require.main === module) {
     startWorker().catch((error) => {

@@ -3,7 +3,16 @@ import { testConnection } from './config/supabase';
 import { testStorageConnection } from './utils/storage';
 import { getNextJob, getJobStats, cleanupOldJobs } from './utils/database';
 import { processCSVJob, validateJob, getProcessingStats } from './processors/csv-processor';
-import { WorkerConfig, Job, WorkerError } from './types';
+import { startHealthServer, startHealthLogging } from './monitoring/health-server';
+import {
+  setWorkerRunning,
+  setWorkerShuttingDown,
+  setCurrentJob,
+  incrementJobsProcessed,
+  setWorkerConfig,
+  getWorkerHealth as getSharedWorkerHealth
+} from './monitoring/worker-state';
+import { WorkerConfig, WorkerError } from './types';
 
 // Load environment variables
 dotenv.config();
@@ -18,11 +27,7 @@ const config: WorkerConfig = {
   chunkSize: parseInt(process.env.CHUNK_SIZE || '5242880')
 };
 
-// Worker state
-let isRunning = false;
-let isShuttingDown = false;
-let currentJob: Job | null = null;
-let jobsProcessed = 0;
+// Local state (non-shared)
 let lastCleanup = Date.now();
 
 /**
@@ -31,13 +36,13 @@ let lastCleanup = Date.now();
 async function workerLoop(): Promise<void> {
   console.log('🔄 Starting worker loop...');
 
-  while (isRunning && !isShuttingDown) {
+  while (getSharedWorkerHealth().status === 'running' && !getSharedWorkerHealth().isShuttingDown) {
     try {
       // Get next job from queue
       const job = await getNextJob('csv_process');
 
       if (job) {
-        currentJob = job;
+        setCurrentJob(job);
         console.log(`📋 Picked up job ${job.id} for upload ${job.upload_id}`);
 
         try {
@@ -49,13 +54,13 @@ async function workerLoop(): Promise<void> {
 
           // Log results
           console.log(`✅ Job ${job.id} completed: ${getProcessingStats(result)}`);
-          jobsProcessed++;
+          incrementJobsProcessed();
 
         } catch (jobError) {
           const error = jobError as Error;
           console.error(`❌ Job ${job.id} failed:`, error.message);
         } finally {
-          currentJob = null;
+          setCurrentJob(null);
         }
 
       } else {
@@ -107,25 +112,26 @@ async function performCleanup(): Promise<void> {
  */
 async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`\n🛑 Received ${signal}, starting graceful shutdown...`);
-  isShuttingDown = true;
+  setWorkerShuttingDown(true);
 
   // Wait for current job to complete (with timeout)
+  const currentJob = getSharedWorkerHealth().currentJob;
   if (currentJob) {
     console.log(`⏳ Waiting for current job ${currentJob.id} to complete...`);
 
     const shutdownTimeout = 300000; // 5 minutes
     const startTime = Date.now();
 
-    while (currentJob && (Date.now() - startTime) < shutdownTimeout) {
+    while (getSharedWorkerHealth().currentJob && (Date.now() - startTime) < shutdownTimeout) {
       await sleep(1000);
     }
 
-    if (currentJob) {
-      console.log(`⚠️ Shutdown timeout reached, current job ${currentJob.id} may be incomplete`);
+    if (getSharedWorkerHealth().currentJob) {
+      console.log(`⚠️ Shutdown timeout reached, current job ${getSharedWorkerHealth().currentJob.id} may be incomplete`);
     }
   }
 
-  isRunning = false;
+  setWorkerRunning(false);
   console.log('✅ Graceful shutdown completed');
   process.exit(0);
 }
@@ -155,13 +161,24 @@ async function startWorker(): Promise<void> {
       throw new WorkerError('Storage connection test failed', 'STORAGE_CONNECTION_ERROR');
     }
 
+    // Start health monitoring server
+    console.log('🏥 Starting health monitoring server...');
+    await startHealthServer();
+
+    // Start periodic health logging
+    console.log('📊 Starting health logging...');
+    startHealthLogging();
+
+    // Set worker configuration in shared state
+    setWorkerConfig(config);
+
     // Set up signal handlers for graceful shutdown
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // For nodemon
 
     // Start worker
-    isRunning = true;
+    setWorkerRunning(true);
     console.log('✅ Worker initialized successfully');
     console.log('🔄 Starting job processing...');
 
@@ -181,28 +198,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Health check endpoint (for monitoring)
- */
-function getWorkerHealth(): object {
-  return {
-    status: isRunning ? 'running' : 'stopped',
-    isShuttingDown,
-    currentJob: currentJob ? {
-      id: currentJob.id,
-      uploadId: currentJob.upload_id,
-      startedAt: currentJob.updated_at
-    } : null,
-    jobsProcessed,
-    uptime: process.uptime(),
-    memoryUsage: process.memoryUsage(),
-    config: {
-      pollInterval: config.pollInterval,
-      batchSize: config.batchSize,
-      maxRetries: config.maxRetries
-    }
-  };
-}
 
 // Start the worker if this file is run directly
 if (require.main === module) {
@@ -215,6 +210,6 @@ if (require.main === module) {
 export {
   startWorker,
   gracefulShutdown,
-  getWorkerHealth,
+  getSharedWorkerHealth as getWorkerHealth,
   config
 };
