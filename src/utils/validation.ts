@@ -1,3 +1,4 @@
+import Papa from "papaparse";
 import {
   LinkedInConnection,
   ProcessedConnection,
@@ -70,7 +71,7 @@ export function formatRowForSupabase(
 }
 
 /**
- * Validate and process CSV data
+ * Validate and process CSV data using the working logic
  */
 export function validateAndProcessCSVData(
   csvData: string,
@@ -88,63 +89,193 @@ export function validateAndProcessCSVData(
     throw new ValidationError("Owner is required");
   }
 
-  // Split into lines and parse manually for better error handling
-  const lines = csvData.split("\n").filter((line) => line.trim() !== "");
+  // Parse CSV using Papa Parse first to get structured data
+  const parseResult = Papa.parse(csvData, {
+    header: false, // Don't use header mode to handle custom header detection
+    skipEmptyLines: true,
+  });
 
-  if (lines.length < 2) {
-    throw new ValidationError(
-      "CSV must have at least a header and one data row"
-    );
+  if (parseResult.errors.length > 0) {
+    console.warn("CSV parsing warnings:", parseResult.errors);
   }
 
-  // Parse header
-  const header = lines[0].split(",").map((col) => col.trim().replace(/"/g, ""));
+  const rows = parseResult.data as string[][];
 
-  // Validate required columns exist
-  const requiredColumns = ["First Name", "Last Name", "Company", "Position"];
-  const missingColumns = requiredColumns.filter((col) => !header.includes(col));
+  // Find the header row using the working logic
+  const { headerRow, dataStartIndex } = findHeaderRow(rows);
+
+  console.log("Using header row:", headerRow);
+  console.log("Data starts at row:", dataStartIndex);
+
+  // Create column map
+  const columnMap: Record<string, number> = {};
+  headerRow.forEach((header, index) => {
+    if (header) {
+      columnMap[normalizeHeader(header)] = index;
+    }
+  });
+
+  console.log("Column map:", columnMap);
+
+  // Verify required columns
+  const requiredColumns = ["First Name", "Last Name", "URL"];
+  const missingColumns = requiredColumns.filter(
+    (col) =>
+      !Object.keys(columnMap).some(
+        (header) => header.toLowerCase() === col.toLowerCase()
+      )
+  );
 
   if (missingColumns.length > 0) {
     throw new ValidationError(
-      `Missing required columns: ${missingColumns.join(", ")}`
+      `Missing required columns: ${missingColumns.join(
+        ", "
+      )}. Found columns: ${Object.keys(columnMap).join(", ")}`
     );
   }
+
+  // Process data rows
+  const dataRows = rows.slice(dataStartIndex);
+  console.log(`Processing ${dataRows.length} data rows`);
 
   const validRows: ProcessedConnection[] = [];
   let invalidRows = 0;
 
-  // Process data rows
-  for (let i = 1; i < lines.length; i++) {
-    try {
-      const values = lines[i]
-        .split(",")
-        .map((val) => val.trim().replace(/"/g, ""));
-
-      // Create row object
-      const row: any = {};
-      header.forEach((col, index) => {
-        row[col] = values[index] || "";
-      });
-
-      // Validate and format
-      if (validateCSVRow(row)) {
-        const formattedRow = formatRowForSupabase(row, owner);
-        validRows.push(formattedRow);
-      } else {
-        invalidRows++;
-        console.warn(`Invalid row at line ${i + 1}:`, row);
-      }
-    } catch (error) {
-      invalidRows++;
-      console.warn(`Error processing row at line ${i + 1}:`, error);
+  dataRows.forEach((row, index) => {
+    if (!row || row.every((cell) => !cell)) {
+      console.log(`Skipping empty row at index ${index}`);
+      return;
     }
-  }
+
+    // Create row object with exact column names
+    const rowObj: any = {};
+    Object.entries(columnMap).forEach(([header, colIndex]) => {
+      const value = row[colIndex];
+      rowObj[header] = value ? normalizeHeader(value) : null;
+    });
+
+    // Validate and format
+    if (validateCSVRow(rowObj)) {
+      const formattedRow = formatRowForSupabase(rowObj, owner);
+      validRows.push(formattedRow);
+    } else {
+      invalidRows++;
+      console.warn(
+        `Invalid row at line ${index + dataStartIndex + 1}:`,
+        rowObj
+      );
+    }
+  });
 
   return {
     validRows,
     invalidRows,
-    totalRows: lines.length - 1, // Exclude header
+    totalRows: dataRows.length,
   };
+}
+
+/**
+ * Helper function to normalize header text (from working implementation)
+ */
+function normalizeHeader(header: string): string {
+  if (!header) return "";
+  // Remove any quotes and trim whitespace
+  return header.replace(/["']/g, "").trim();
+}
+
+/**
+ * Helper function to split joined headers (from working implementation)
+ */
+function splitJoinedHeaders(text: string): string[] {
+  // Common patterns in LinkedIn CSV headers
+  const patterns = [
+    "First Name",
+    "Last Name",
+    "URL",
+    "Email Address",
+    "Company",
+    "Position",
+    "Connected On",
+  ];
+
+  let result = text;
+  patterns.forEach((pattern) => {
+    // Create a regex that matches the pattern case-insensitive
+    const regex = new RegExp(pattern, "i");
+    const match = result.match(regex);
+    if (match) {
+      // Replace the matched text with the pattern and a comma
+      result = result.replace(match[0], `${pattern},`);
+    }
+  });
+
+  // Remove trailing comma and split
+  return result
+    .replace(/,$/, "")
+    .split(",")
+    .map((h) => h.trim());
+}
+
+/**
+ * Helper function to validate header row (from working implementation)
+ */
+function isValidHeaderRow(row: string[] | any): boolean {
+  if (!row) return false;
+
+  // If it's a string (joined headers), try to split it
+  const headers = Array.isArray(row)
+    ? row.map(normalizeHeader)
+    : splitJoinedHeaders(normalizeHeader(String(row)));
+
+  console.log("Normalized headers:", headers);
+
+  // Check for required columns using case-insensitive comparison
+  const requiredColumns = ["First Name", "Last Name", "URL"];
+  const hasAllRequired = requiredColumns.every((required) =>
+    headers.some((header) => header.toLowerCase() === required.toLowerCase())
+  );
+
+  console.log("Has all required columns:", hasAllRequired);
+  return hasAllRequired;
+}
+
+/**
+ * Find header row in CSV data (from working implementation)
+ */
+function findHeaderRow(rows: string[][]): {
+  headerRow: string[];
+  dataStartIndex: number;
+} {
+  console.log("Searching for header row...");
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || !row.length) continue;
+
+    // Convert row to string if it's an array
+    const rowText = Array.isArray(row) ? row.join(" ") : String(row);
+
+    // Skip notes section
+    if (
+      rowText.toLowerCase().includes("notes:") ||
+      rowText.toLowerCase().includes("when exporting your connection data")
+    ) {
+      continue;
+    }
+
+    // Try to find header row
+    console.log(`Checking row ${i + 1}:`, rowText);
+
+    if (isValidHeaderRow(row)) {
+      console.log(`Found valid header row at position ${i + 1}`);
+      return {
+        headerRow: Array.isArray(row) ? row : splitJoinedHeaders(String(row)),
+        dataStartIndex: i + 1,
+      };
+    }
+  }
+
+  throw new ValidationError("No valid header row found in the CSV file");
 }
 
 /**

@@ -1,7 +1,18 @@
 // Database types matching the bulletproof schema
-export type UploadStatus = 'pending' | 'uploading' | 'queued' | 'processing' | 'completed' | 'failed';
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'retrying';
-export type JobType = 'csv_process';
+export type UploadStatus =
+  | "pending"
+  | "uploading"
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "retrying";
+export type JobType = "csv_process";
 
 export interface Upload {
   id: string;
@@ -40,23 +51,23 @@ export interface UploadChunk {
 
 // CSV processing types
 export interface LinkedInConnection {
-  'First Name': string;
-  'Last Name': string;
-  'URL': string;
-  'Email Address'?: string;
-  'Company'?: string;
-  'Position'?: string;
-  'Connected On'?: string;
+  "First Name": string;
+  "Last Name": string;
+  URL: string;
+  "Email Address"?: string;
+  Company?: string;
+  Position?: string;
+  "Connected On"?: string;
 }
 
 export interface ProcessedConnection {
   Name: string;
-  'Profile URL': string;
+  "Profile URL": string;
   Owner: string;
   Email: string | null;
   Company: string | null;
   Title: string | null;
-  'Connected On': string | null;
+  "Connected On": string | null;
 }
 
 export interface BatchProcessResult {
@@ -109,27 +120,27 @@ export class WorkerError extends Error {
     public readonly uploadId?: string
   ) {
     super(message);
-    this.name = 'WorkerError';
+    this.name = "WorkerError";
   }
 }
 
 export class StorageError extends WorkerError {
   constructor(message: string, jobId?: string, uploadId?: string) {
-    super(message, 'STORAGE_ERROR', jobId, uploadId);
-    this.name = 'StorageError';
+    super(message, "STORAGE_ERROR", jobId, uploadId);
+    this.name = "StorageError";
   }
 }
 
 export class DatabaseError extends WorkerError {
   constructor(message: string, jobId?: string, uploadId?: string) {
-    super(message, 'DATABASE_ERROR', jobId, uploadId);
-    this.name = 'DatabaseError';
+    super(message, "DATABASE_ERROR", jobId, uploadId);
+    this.name = "DatabaseError";
   }
 }
 
 export class ValidationError extends WorkerError {
   constructor(message: string, jobId?: string, uploadId?: string) {
-    super(message, 'VALIDATION_ERROR', jobId, uploadId);
-    this.name = 'ValidationError';
+    super(message, "VALIDATION_ERROR", jobId, uploadId);
+    this.name = "ValidationError";
   }
 }

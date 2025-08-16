@@ -1,18 +1,30 @@
-import dotenv from 'dotenv';
-import { testConnection } from './config/supabase';
-import { testStorageConnection } from './utils/storage';
-import { getNextJob, getJobStats, cleanupOldJobs, debugJobsTable } from './utils/database';
-import { processCSVJob, validateJob, getProcessingStats } from './processors/csv-processor';
-import { startHealthServer, startHealthLogging } from './monitoring/health-server';
+import dotenv from "dotenv";
+import { testConnection } from "./config/supabase";
+import { testStorageConnection } from "./utils/storage";
+import {
+  getNextJob,
+  getJobStats,
+  cleanupOldJobs,
+  debugJobsTable,
+} from "./utils/database";
+import {
+  processCSVJob,
+  validateJob,
+  getProcessingStats,
+} from "./processors/csv-processor";
+import {
+  startHealthServer,
+  startHealthLogging,
+} from "./monitoring/health-server";
 import {
   setWorkerRunning,
   setWorkerShuttingDown,
   setCurrentJob,
   incrementJobsProcessed,
   setWorkerConfig,
-  getWorkerHealth as getSharedWorkerHealth
-} from './monitoring/worker-state';
-import { WorkerConfig, WorkerError } from './types';
+  getWorkerHealth as getSharedWorkerHealth,
+} from "./monitoring/worker-state";
+import { WorkerConfig, WorkerError } from "./types";
 
 // Load environment variables
 dotenv.config();
