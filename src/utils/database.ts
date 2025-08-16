@@ -168,6 +168,119 @@ export async function getUpload(uploadId: string): Promise<Upload> {
 }
 
 /**
+ * Check for duplicate records using the existing RPC function
+ */
+export async function checkForDuplicates(
+  records: ProcessedConnection[]
+): Promise<{
+  uniqueRecords: ProcessedConnection[];
+  duplicateCount: number;
+  success: boolean;
+  message: string;
+}> {
+  try {
+    console.log(`🔍 Checking ${records.length} records for duplicates...`);
+
+    if (!records || records.length === 0) {
+      return {
+        uniqueRecords: [],
+        duplicateCount: 0,
+        success: true,
+        message: "No records to check for duplicates.",
+      };
+    }
+
+    const profileUrls = [
+      ...new Set(records.map((r) => r["Profile URL"]).filter(Boolean)),
+    ];
+
+    if (profileUrls.length === 0) {
+      return {
+        uniqueRecords: records,
+        duplicateCount: 0,
+        success: true,
+        message: "No records with Profile URLs to check for duplicates.",
+      };
+    }
+
+    // Step 2: Fetch all existing connections in batches to avoid "414 Request-URI Too Large" error.
+    const BATCH_SIZE = 250; // Keep the URL length safely under server/proxy limits.
+    let allExistingRecords: { "Profile URL": string; Owner: string }[] = [];
+
+    console.log(
+      `⚡️ Fetching existing records in batches of ${BATCH_SIZE} to check for duplicates.`
+    );
+
+    for (let i = 0; i < profileUrls.length; i += BATCH_SIZE) {
+      const batch = profileUrls.slice(i, i + BATCH_SIZE);
+
+      const { data: batchResult, error } = await supabase
+        .from("linkedin_connections")
+        .select('"Profile URL", Owner')
+        .in("Profile URL", batch);
+
+      if (error) {
+        console.error(
+          `Error fetching duplicate check batch (starting at index ${i}):`,
+          error
+        );
+        throw new DatabaseError(
+          `Failed to query for duplicates in a batch: ${error.message}`
+        );
+      }
+
+      if (batchResult) {
+        allExistingRecords = allExistingRecords.concat(batchResult);
+      }
+    }
+
+    // Step 3: Create a Set of existing records for fast lookups.
+    // Use only Profile URL for global deduplication (same LinkedIn profile can't exist twice)
+    const existingSet = new Set(
+      allExistingRecords.map((r) => r["Profile URL"]?.toLowerCase())
+    );
+
+    // Step 4: Partition the incoming records into unique and duplicate arrays.
+    const uniqueRecords: ProcessedConnection[] = [];
+    const duplicateRecords: ProcessedConnection[] = [];
+
+    for (const record of records) {
+      // Check only Profile URL for global deduplication
+      const profileUrl = record["Profile URL"]?.toLowerCase();
+      if (existingSet.has(profileUrl)) {
+        duplicateRecords.push(record);
+      } else {
+        uniqueRecords.push(record);
+        // Add the new record to the set to handle duplicates within the CSV file itself.
+        existingSet.add(profileUrl);
+      }
+    }
+
+    const duplicateCount = duplicateRecords.length;
+    const message = `Duplicate check complete. Found ${uniqueRecords.length} new records and ${duplicateCount} duplicates.`;
+
+    console.log(`✅ ${message}`);
+
+    return {
+      uniqueRecords,
+      duplicateCount,
+      success: true,
+      message,
+    };
+  } catch (error) {
+    console.error("Error in checkForDuplicates:", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    return {
+      uniqueRecords: records, // Fallback: return all records if the check fails.
+      duplicateCount: 0,
+      success: false,
+      message: `Duplicate check failed: ${errorMessage}`,
+    };
+  }
+}
+
+/**
  * Batch insert LinkedIn connections (adapted from existing logic)
  */
 export async function batchInsertConnections(

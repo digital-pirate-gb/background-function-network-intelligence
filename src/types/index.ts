@@ -94,6 +94,17 @@ export interface JobResult {
   error?: string;
 }
 
+// Processing progress with duplicate info
+export interface ProcessingResult {
+  validRows: ProcessedConnection[];
+  uniqueRows: ProcessedConnection[];
+  invalidRows: number;
+  duplicateRows: number;
+  totalRows: number;
+  duplicateCheckSuccess: boolean;
+  duplicateCheckMessage: string;
+}
+
 // Storage types
 export interface StorageChunk {
   path: string;

@@ -3,7 +3,9 @@ import {
   LinkedInConnection,
   ProcessedConnection,
   ValidationError,
+  ProcessingResult,
 } from "../types";
+import { checkForDuplicates } from "./database";
 
 /**
  * Validate a CSV row for LinkedIn connections
@@ -71,16 +73,12 @@ export function formatRowForSupabase(
 }
 
 /**
- * Validate and process CSV data using the working logic
+ * Validate and process CSV data with duplicate checking
  */
-export function validateAndProcessCSVData(
+export async function validateAndProcessCSVData(
   csvData: string,
   owner: string
-): {
-  validRows: ProcessedConnection[];
-  invalidRows: number;
-  totalRows: number;
-} {
+): Promise<ProcessingResult> {
   if (!csvData || csvData.trim() === "") {
     throw new ValidationError("CSV data is empty");
   }
@@ -91,7 +89,7 @@ export function validateAndProcessCSVData(
 
   // Parse CSV using Papa Parse first to get structured data
   const parseResult = Papa.parse(csvData, {
-    header: false, // Don't use header mode to handle custom header detection
+    header: false, 
     skipEmptyLines: true,
   });
 
@@ -167,10 +165,22 @@ export function validateAndProcessCSVData(
     }
   });
 
+  console.log(
+    `✅ Validation complete: ${validRows.length} valid, ${invalidRows} invalid from ${dataRows.length} total rows`
+  );
+
+  // Check for duplicates
+  console.log("🔍 Starting duplicate check...");
+  const duplicateResult = await checkForDuplicates(validRows);
+
   return {
     validRows,
+    uniqueRows: duplicateResult.uniqueRecords,
     invalidRows,
+    duplicateRows: duplicateResult.duplicateCount,
     totalRows: dataRows.length,
+    duplicateCheckSuccess: duplicateResult.success,
+    duplicateCheckMessage: duplicateResult.message,
   };
 }
 
@@ -334,18 +344,25 @@ export function sanitizeCSVData(csvData: string): string {
 }
 
 /**
- * Get validation summary
+ * Get validation summary with duplicate information
  */
-export function getValidationSummary(
-  validRows: ProcessedConnection[],
-  invalidRows: number,
-  totalRows: number
-): string {
-  const validCount = validRows.length;
+export function getValidationSummary(result: ProcessingResult): string {
+  const validCount = result.validRows.length;
+  const uniqueCount = result.uniqueRows.length;
+  const totalCount = result.totalRows;
   const validPercentage =
-    totalRows > 0 ? Math.round((validCount / totalRows) * 100) : 0;
+    totalCount > 0 ? Math.round((validCount / totalCount) * 100) : 0;
 
-  return `Validation complete: ${validCount}/${totalRows} rows valid (${validPercentage}%), ${invalidRows} invalid rows`;
+  let summary = `Validation complete: ${validCount}/${totalCount} rows valid (${validPercentage}%), ${result.invalidRows} invalid rows`;
+
+  if (result.duplicateCheckSuccess) {
+    summary += `\n🔍 Duplicate check: ${uniqueCount} unique records, ${result.duplicateRows} duplicates found`;
+    summary += `\n📝 ${result.duplicateCheckMessage}`;
+  } else {
+    summary += `\n⚠️ Duplicate check failed: ${result.duplicateCheckMessage}`;
+  }
+
+  return summary;
 }
 
 export function normalizeHeaders(headers: string[]): string[] {
