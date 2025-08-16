@@ -1,4 +1,4 @@
-import { Job, JobResult } from '../types';
+import { Job, JobResult } from "../types";
 export declare function processCSVJob(job: Job): Promise<JobResult>;
 export declare function validateJob(job: Job): void;
 export declare function getProcessingStats(result: JobResult): string;

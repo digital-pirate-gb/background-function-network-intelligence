@@ -1,6 +1,6 @@
-export type UploadStatus = 'pending' | 'uploading' | 'queued' | 'processing' | 'completed' | 'failed';
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'retrying';
-export type JobType = 'csv_process';
+export type UploadStatus = "pending" | "uploading" | "queued" | "processing" | "completed" | "failed";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "retrying";
+export type JobType = "csv_process";
 export interface Upload {
     id: string;
     user_id: string;
@@ -34,22 +34,22 @@ export interface UploadChunk {
     received_at: string;
 }
 export interface LinkedInConnection {
-    'First Name': string;
-    'Last Name': string;
-    'Email Address'?: string;
-    'Company': string;
-    'Position': string;
-    'Connected On': string;
+    "First Name": string;
+    "Last Name": string;
+    URL: string;
+    "Email Address"?: string;
+    Company?: string;
+    Position?: string;
+    "Connected On"?: string;
 }
 export interface ProcessedConnection {
-    first_name: string;
-    last_name: string;
-    email: string | null;
-    company: string;
-    position: string;
-    connected_on: string;
-    owner: string;
-    created_at: string;
+    Name: string;
+    "Profile URL": string;
+    Owner: string;
+    Email: string | null;
+    Company: string | null;
+    Title: string | null;
+    "Connected On": string | null;
 }
 export interface BatchProcessResult {
     inserted_count: number;

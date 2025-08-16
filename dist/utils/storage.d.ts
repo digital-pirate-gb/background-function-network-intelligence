@@ -1,4 +1,4 @@
-import { StorageChunk } from '../types';
+import { StorageChunk } from "../types";
 export declare function getUploadChunks(uploadId: string, filename: string): Promise<StorageChunk[]>;
 export declare function downloadChunksAsStream(uploadId: string, filename: string): Promise<string>;
 export declare function verifyChunksExist(uploadId: string, filename: string, expectedChunks: number): Promise<boolean>;

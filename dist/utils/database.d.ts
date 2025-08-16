@@ -1,9 +1,10 @@
-import { Job, Upload, JobStatus, JobType, UploadStatus, ProcessedConnection, BatchProcessResult } from '../types';
+import { Job, Upload, JobStatus, JobType, UploadStatus, ProcessedConnection, BatchProcessResult } from "../types";
 export declare function getNextJob(jobType?: JobType): Promise<Job | null>;
 export declare function updateJobProgress(jobId: string, status?: JobStatus | null, progress?: number | null, error?: string | null, heartbeat?: boolean): Promise<Job>;
 export declare function updateUploadStatus(uploadId: string, status?: UploadStatus | null, bytesUploaded?: number | null, error?: string | null): Promise<Upload>;
 export declare function getUpload(uploadId: string): Promise<Upload>;
 export declare function batchInsertConnections(connections: ProcessedConnection[]): Promise<BatchProcessResult[]>;
+export declare function debugJobsTable(): Promise<void>;
 export declare function getJobStats(): Promise<Array<{
     status: JobStatus;
     count: number;
