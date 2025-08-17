@@ -8,6 +8,9 @@ ARG BUILD_VERSION
 # Set working directory
 WORKDIR /app
 
+# Ensure dev dependencies (e.g. typescript) are installed during build
+ENV NODE_ENV=development
+
 # Copy package files for better layer caching
 COPY package*.json ./
 COPY tsconfig.json ./
