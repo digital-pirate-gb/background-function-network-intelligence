@@ -66,4 +66,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 ENTRYPOINT ["dumb-init", "--"]
 
 # Start the worker
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/worker.js"]
