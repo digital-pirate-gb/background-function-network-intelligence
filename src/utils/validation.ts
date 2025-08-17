@@ -18,6 +18,67 @@ interface BatchManager {
 }
 
 /**
+ * Get value from row object using case-insensitive header matching
+ */
+function getRowValue(row: any, expectedKey: string): any {
+  // First try exact match
+  if (row[expectedKey] !== undefined) {
+    return row[expectedKey];
+  }
+
+  // Then try case-insensitive match
+  const keys = Object.keys(row);
+  const matchingKey = keys.find(
+    (key) => key.toLowerCase().trim() === expectedKey.toLowerCase().trim()
+  );
+
+  return matchingKey ? row[matchingKey] : undefined;
+}
+
+/**
+ * Parse LinkedIn CSV row that may have malformed headers
+ */
+function parseLinkedInRow(row: any): LinkedInConnection | null {
+  // Handle the case where data is in __parsed_extra due to CSV parsing issues
+  if (
+    row["Notes:"] &&
+    row.__parsed_extra &&
+    Array.isArray(row.__parsed_extra)
+  ) {
+    const firstName = row["Notes:"]?.trim();
+    const lastName = row.__parsed_extra[0]?.trim();
+    const url = row.__parsed_extra[1]?.trim();
+    const email = row.__parsed_extra[2]?.trim();
+    const company = row.__parsed_extra[3]?.trim();
+    const position = row.__parsed_extra[4]?.trim();
+    const connectedOn = row.__parsed_extra[5]?.trim();
+
+    return {
+      "First Name": firstName || "",
+      "Last Name": lastName || "",
+      URL: url || "",
+      "Email Address": email || "",
+      Company: company || "",
+      Position: position || "",
+      "Connected On": connectedOn || "",
+    };
+  }
+
+  // Handle normal CSV structure
+  return {
+    "First Name": getRowValue(row, "First Name") || "",
+    "Last Name": getRowValue(row, "Last Name") || "",
+    URL: getRowValue(row, "URL") || "",
+    "Email Address": getRowValue(row, "Email Address") || "",
+    Company: getRowValue(row, "Company") || "",
+    Position: getRowValue(row, "Position") || "",
+    "Connected On": getRowValue(row, "Connected On") || "",
+  };
+}
+
+// Global counter to limit debug output
+
+/**
  * Validate a CSV row for LinkedIn connections
  * Adapted from existing csvValidation.js
  */
@@ -26,30 +87,36 @@ export function validateCSVRow(row: any): row is LinkedInConnection {
     return false;
   }
 
-  // Skip empty rows
-  if (!row["First Name"] && !row["Last Name"] && !row["URL"]) {
+  // Parse the row to get LinkedIn connection data
+  const parsedRow = parseLinkedInRow(row);
+  if (!parsedRow) {
     return false;
   }
 
-  // Required fields for LinkedIn connections (matching existing logic)
-  if (!row["First Name"] || !row["Last Name"] || !row["URL"]) {
+  const {
+    "First Name": firstName,
+    "Last Name": lastName,
+    URL: url,
+  } = parsedRow;
+
+  // Skip empty rows
+  if (!firstName && !lastName && !url) {
+    return false;
+  }
+
+  // Required fields for LinkedIn connections
+  if (!firstName || !lastName || !url) {
     return false;
   }
 
   // Validate LinkedIn URL format
   const urlPattern = /linkedin\.com\/in\//i;
-  if (!urlPattern.test(row["URL"])) {
+  if (!urlPattern.test(url)) {
     return false;
   }
 
-  // Optional but should be string if present
-  if (row["Email Address"] && typeof row["Email Address"] !== "string") {
-    return false;
-  }
-
-  if (row["Connected On"] && typeof row["Connected On"] !== "string") {
-    return false;
-  }
+  // Update the original row object to have the correct structure
+  Object.assign(row, parsedRow);
 
   return true;
 }
@@ -77,24 +144,35 @@ export function normalizeAndHashUrl(url: string): {
  * Adapted from existing csvValidation.js
  */
 export function formatRowForSupabase(
-  row: LinkedInConnection,
+  row: any,
   owner: string
 ): ProcessedConnection {
-  // Ensure consistent spacing in name
-  const firstName = (row["First Name"] || "").trim();
-  const lastName = (row["Last Name"] || "").trim();
-  const fullName = [firstName, lastName].filter(Boolean).join(" ");
+  // Get values using flexible header matching
+  const firstName = getRowValue(row, "First Name");
+  const lastName = getRowValue(row, "Last Name");
+  const url = getRowValue(row, "URL");
+  const emailAddress = getRowValue(row, "Email Address");
+  const company = getRowValue(row, "Company");
+  const position = getRowValue(row, "Position");
+  const connectedOn = getRowValue(row, "Connected On");
 
-  const { normalizedUrl, hash } = normalizeAndHashUrl(row["URL"]);
+  // Ensure consistent spacing in name
+  const firstNameTrimmed = (firstName || "").trim();
+  const lastNameTrimmed = (lastName || "").trim();
+  const fullName = [firstNameTrimmed, lastNameTrimmed]
+    .filter(Boolean)
+    .join(" ");
+
+  const { normalizedUrl, hash } = normalizeAndHashUrl(url);
 
   return {
     Name: fullName,
     "Profile URL": normalizedUrl,
     Owner: owner.trim(),
-    Email: row["Email Address"]?.trim() || null,
-    Company: row["Company"]?.trim() || null,
-    Title: row["Position"]?.trim() || null,
-    "Connected On": row["Connected On"]?.trim() || null,
+    Email: emailAddress?.trim() || null,
+    Company: company?.trim() || null,
+    Title: position?.trim() || null,
+    "Connected On": connectedOn?.trim() || null,
     url_hash: hash,
   };
 }
@@ -157,6 +235,78 @@ function addBatchToManager(
 }
 
 /**
+ * Preprocess CSV stream to skip notes section and find proper headers
+ */
+async function preprocessCSVStream(stream: Readable): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let csvData = "";
+
+    stream.on("data", (chunk) => {
+      csvData += chunk.toString();
+    });
+
+    stream.on("end", () => {
+      try {
+        // Split into lines
+        const lines = csvData.split("\n");
+        let headerRowIndex = -1;
+
+        // Find the actual header row (skip notes section)
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+
+          // Skip empty lines
+          if (!line) continue;
+
+          // Skip notes section
+          if (
+            line.toLowerCase().includes("notes:") ||
+            line.toLowerCase().includes("when exporting your connection data")
+          ) {
+            console.log(
+              `🔍 Skipping notes line ${i + 1}: ${line.substring(0, 50)}...`
+            );
+            continue;
+          }
+
+          // Check if this looks like a header row
+          const lowerLine = line.toLowerCase();
+          if (
+            lowerLine.includes("first name") &&
+            lowerLine.includes("last name") &&
+            lowerLine.includes("url")
+          ) {
+            headerRowIndex = i;
+            console.log(`✅ Found header row at line ${i + 1}: ${line}`);
+            break;
+          }
+        }
+
+        if (headerRowIndex === -1) {
+          reject(
+            new ValidationError("Could not find valid header row in CSV file")
+          );
+          return;
+        }
+
+        // Return CSV data starting from the header row
+        const processedCSV = lines.slice(headerRowIndex).join("\n");
+        console.log(
+          `📝 Preprocessed CSV: skipped ${headerRowIndex} lines, processing ${
+            lines.length - headerRowIndex
+          } lines`
+        );
+        resolve(processedCSV);
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    stream.on("error", reject);
+  });
+}
+
+/**
  * Stream-based CSV validation and processing with proper concurrency control
  */
 export async function validateAndProcessCSVStream(
@@ -165,109 +315,135 @@ export async function validateAndProcessCSVStream(
   batchSize: number,
   maxConcurrency: number
 ): Promise<{ processed: number; duplicates: number; total: number }> {
-  return new Promise((resolve, reject) => {
-    let totalRows = 0;
-    let validRows = 0;
-    let batch: ProcessedConnection[] = [];
-    let batchCounter = 0;
+  try {
+    // First, preprocess the CSV to skip notes section and find proper headers
+    console.log("🔍 Preprocessing CSV to find proper headers...");
+    const preprocessedCSV = await preprocessCSVStream(stream);
 
-    const manager: BatchManager = {
-      activeBatches: new Set(),
-      maxConcurrency,
-      processedCount: 0,
-      duplicateCount: 0,
-      errorCount: 0,
-    };
+    // Create a new readable stream from the preprocessed data
+    const { Readable } = await import("stream");
+    const preprocessedStream = Readable.from([preprocessedCSV]);
 
-    const processBatchAsync = async (
-      batchToProcess: ProcessedConnection[]
-    ): Promise<void> => {
-      await waitForBatchSlot(manager);
+    return new Promise((resolve, reject) => {
+      let totalRows = 0;
+      let validRows = 0;
+      let batch: ProcessedConnection[] = [];
+      let batchCounter = 0;
+      let headerLogged = false;
 
-      const currentBatchNumber = ++batchCounter;
-      const batchPromise = processBatch(
-        batchToProcess,
-        currentBatchNumber,
-        manager
-      );
+      const manager: BatchManager = {
+        activeBatches: new Set(),
+        maxConcurrency,
+        processedCount: 0,
+        duplicateCount: 0,
+        errorCount: 0,
+      };
 
-      addBatchToManager(manager, batchPromise);
-    };
+      const processBatchAsync = async (
+        batchToProcess: ProcessedConnection[]
+      ): Promise<void> => {
+        await waitForBatchSlot(manager);
 
-    // Create streaming parser
-    const parser = Papa.parse(Papa.NODE_STREAM_INPUT, {
-      header: true,
-      skipEmptyLines: true,
-    });
+        const currentBatchNumber = ++batchCounter;
+        const batchPromise = processBatch(
+          batchToProcess,
+          currentBatchNumber,
+          manager
+        );
 
-    parser.on("data", async (row: any) => {
-      totalRows++;
+        addBatchToManager(manager, batchPromise);
+      };
 
-      if (validateCSVRow(row)) {
-        validRows++;
-        const formattedRow = formatRowForSupabase(row, owner);
-        batch.push(formattedRow);
+      // Create streaming parser with proper headers
+      const parser = Papa.parse(Papa.NODE_STREAM_INPUT, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (header: string) => {
+          // Clean up header names
+          return header.trim().replace(/^\uFEFF/, "");
+        },
+      });
 
-        // Process batch when it reaches the target size
-        if (batch.length >= batchSize) {
-          const batchToProcess = [...batch];
-          batch = [];
+      parser.on("data", async (row: any) => {
+        totalRows++;
 
-          try {
-            await processBatchAsync(batchToProcess);
-          } catch (error) {
-            console.error("Error processing batch:", error);
-            // Continue processing - don't fail the entire stream
+        // Log headers for debugging on first row
+        if (!headerLogged) {
+          headerLogged = true;
+        }
+
+        if (validateCSVRow(row)) {
+          validRows++;
+          const formattedRow = formatRowForSupabase(row, owner);
+          batch.push(formattedRow);
+
+          // Process batch when it reaches the target size
+          if (batch.length >= batchSize) {
+            const batchToProcess = [...batch];
+            batch = [];
+
+            try {
+              await processBatchAsync(batchToProcess);
+            } catch (error) {
+              console.error("Error processing batch:", error);
+              // Continue processing - don't fail the entire stream
+            }
           }
         }
-      }
 
-      // Log progress periodically
-      if (totalRows % 1000 === 0) {
-        console.log(
-          `📊 Progress: ${totalRows} rows processed, ${validRows} valid, ${manager.activeBatches.size} active batches`
-        );
-      }
-    });
-
-    parser.on("end", async () => {
-      try {
-        // Process any remaining batch
-        if (batch.length > 0) {
-          await processBatchAsync([...batch]);
+        // Log progress periodically
+        if (totalRows % 1000 === 0) {
+          console.log(
+            `📊 Progress: ${totalRows} rows processed, ${validRows} valid, ${manager.activeBatches.size} active batches`
+          );
         }
+      });
 
-        // Wait for all remaining batches to complete
-        console.log(
-          `⏳ Waiting for ${manager.activeBatches.size} remaining batches to complete...`
-        );
-        await Promise.all(Array.from(manager.activeBatches));
+      parser.on("end", async () => {
+        try {
+          // Process any remaining batch
+          if (batch.length > 0) {
+            await processBatchAsync([...batch]);
+          }
 
-        console.log(
-          `🎉 Stream processing complete: ${totalRows} total rows, ${validRows} valid rows`
-        );
-        console.log(
-          `📊 Final results: ${manager.processedCount} inserted, ${manager.duplicateCount} duplicates, ${manager.errorCount} errors`
-        );
+          // Wait for all remaining batches to complete
+          console.log(
+            `⏳ Waiting for ${manager.activeBatches.size} remaining batches to complete...`
+          );
+          await Promise.all(Array.from(manager.activeBatches));
 
-        resolve({
-          processed: manager.processedCount,
-          duplicates: manager.duplicateCount,
-          total: validRows,
-        });
-      } catch (error) {
-        reject(error);
-      }
+          console.log(
+            `🎉 Stream processing complete: ${totalRows} total rows, ${validRows} valid rows`
+          );
+          console.log(
+            `📊 Final results: ${manager.processedCount} inserted, ${manager.duplicateCount} duplicates, ${manager.errorCount} errors`
+          );
+
+          resolve({
+            processed: manager.processedCount,
+            duplicates: manager.duplicateCount,
+            total: validRows,
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+
+      parser.on("error", (error: any) => {
+        console.error("CSV parsing error:", error);
+        reject(new ValidationError(`CSV parsing failed: ${error.message}`));
+      });
+
+      // Start processing the preprocessed stream
+      preprocessedStream.pipe(parser);
     });
-
-    parser.on("error", (error: any) => {
-      console.error("CSV parsing error:", error);
-      reject(new ValidationError(`CSV parsing failed: ${error.message}`));
-    });
-
-    // Start processing
-    stream.pipe(parser);
-  });
+  } catch (error) {
+    throw new ValidationError(
+      `CSV preprocessing failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
 }
 
 /**
