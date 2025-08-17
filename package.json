@@ -1,24 +1,24 @@
 {
-  "name": "csv-worker-service",
+  "name": "background-function-network-intelligence",
   "version": "1.0.0",
-  "description": "Background worker service for processing CSV uploads in bulletproof architecture",
-  "main": "dist/worker.js",
+  "description": "Background worker service for network intelligence processing in bulletproof architecture",
+  "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/worker.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/worker.ts",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "test": "jest",
     "test:watch": "jest --watch",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
-    "docker:build": "docker build -t csv-worker .",
-    "docker:run": "docker run --env-file .env csv-worker",
+    "docker:build": "docker build -t background-function-network-intelligence .",
+    "docker:run": "docker run --env-file .env background-function-network-intelligence",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "csv",
-    "worker",
+    "network-intelligence",
     "background-processing",
+    "worker",
     "supabase",
     "bulletproof",
     "typescript"
@@ -29,7 +29,8 @@
     "@supabase/supabase-js": "^2.55.0",
     "dotenv": "^16.3.1",
     "papaparse": "^5.4.1",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "typescript": "^5.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.11",
@@ -41,8 +42,7 @@
     "jest": "^29.7.0",
     "nodemon": "^3.0.2",
     "ts-jest": "^29.1.1",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.3.0"
+    "ts-node-dev": "^2.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
