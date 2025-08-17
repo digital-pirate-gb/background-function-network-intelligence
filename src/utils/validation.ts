@@ -1,11 +1,21 @@
-import Papa from "papaparse";
+import { Readable } from "stream";
+import * as Papa from "papaparse";
 import {
   LinkedInConnection,
   ProcessedConnection,
   ValidationError,
   ProcessingResult,
 } from "../types";
-import { checkForDuplicates } from "./database";
+import { batchInsertConnections } from "./database";
+import { createHash } from "crypto";
+
+interface BatchManager {
+  activeBatches: Set<Promise<void>>;
+  maxConcurrency: number;
+  processedCount: number;
+  duplicateCount: number;
+  errorCount: number;
+}
 
 /**
  * Validate a CSV row for LinkedIn connections
@@ -22,11 +32,7 @@ export function validateCSVRow(row: any): row is LinkedInConnection {
   }
 
   // Required fields for LinkedIn connections (matching existing logic)
-  if (!row["First Name"] || !row["Last Name"]) {
-    return false;
-  }
-
-  if (!row["URL"]) {
+  if (!row["First Name"] || !row["Last Name"] || !row["URL"]) {
     return false;
   }
 
@@ -49,6 +55,24 @@ export function validateCSVRow(row: any): row is LinkedInConnection {
 }
 
 /**
+ * Normalise and hash a URL for efficient storage and lookup.
+ * - Converts to lowercase.
+ * - Removes trailing slashes.
+ * - Computes a SHA-256 hash.
+ */
+export function normalizeAndHashUrl(url: string): {
+  normalizedUrl: string;
+  hash: string;
+} {
+  if (!url) {
+    return { normalizedUrl: "", hash: "" };
+  }
+  const normalized = url.toLowerCase().trim().replace(/\/$/, "");
+  const hash = createHash("sha256").update(normalized).digest("hex");
+  return { normalizedUrl: normalized, hash };
+}
+
+/**
  * Format a validated CSV row for Supabase insertion
  * Adapted from existing csvValidation.js
  */
@@ -61,127 +85,189 @@ export function formatRowForSupabase(
   const lastName = (row["Last Name"] || "").trim();
   const fullName = [firstName, lastName].filter(Boolean).join(" ");
 
+  const { normalizedUrl, hash } = normalizeAndHashUrl(row["URL"]);
+
   return {
     Name: fullName,
-    "Profile URL": row["URL"] ? row["URL"].trim() : "",
+    "Profile URL": normalizedUrl,
     Owner: owner.trim(),
     Email: row["Email Address"]?.trim() || null,
     Company: row["Company"]?.trim() || null,
     Title: row["Position"]?.trim() || null,
     "Connected On": row["Connected On"]?.trim() || null,
+    url_hash: hash,
   };
 }
 
 /**
- * Validate and process CSV data with duplicate checking
+ * Process a batch of connections with proper error handling
  */
-export async function validateAndProcessCSVData(
-  csvData: string,
-  owner: string
-): Promise<ProcessingResult> {
-  if (!csvData || csvData.trim() === "") {
-    throw new ValidationError("CSV data is empty");
-  }
+async function processBatch(
+  batch: ProcessedConnection[],
+  batchNumber: number,
+  manager: BatchManager
+): Promise<void> {
+  if (batch.length === 0) return;
 
-  if (!owner || owner.trim() === "") {
-    throw new ValidationError("Owner is required");
-  }
+  try {
+    console.log(`📦 Processing batch ${batchNumber}: ${batch.length} records`);
 
-  // Parse CSV using Papa Parse first to get structured data
-  const parseResult = Papa.parse(csvData, {
-    header: false, 
-    skipEmptyLines: true,
-  });
+    const results = await batchInsertConnections(batch);
 
-  if (parseResult.errors.length > 0) {
-    console.warn("CSV parsing warnings:", parseResult.errors);
-  }
+    if (results && results.length > 0) {
+      const result = results[0];
+      manager.processedCount += result.inserted_count || 0;
+      manager.duplicateCount += result.duplicate_count || 0;
 
-  const rows = parseResult.data as string[][];
-
-  // Find the header row using the working logic
-  const { headerRow, dataStartIndex } = findHeaderRow(rows);
-
-  console.log("Using header row:", headerRow);
-  console.log("Data starts at row:", dataStartIndex);
-
-  // Create column map
-  const columnMap: Record<string, number> = {};
-  headerRow.forEach((header, index) => {
-    if (header) {
-      columnMap[normalizeHeader(header)] = index;
-    }
-  });
-
-  console.log("Column map:", columnMap);
-
-  // Verify required columns
-  const requiredColumns = ["First Name", "Last Name", "URL"];
-  const missingColumns = requiredColumns.filter(
-    (col) =>
-      !Object.keys(columnMap).some(
-        (header) => header.toLowerCase() === col.toLowerCase()
-      )
-  );
-
-  if (missingColumns.length > 0) {
-    throw new ValidationError(
-      `Missing required columns: ${missingColumns.join(
-        ", "
-      )}. Found columns: ${Object.keys(columnMap).join(", ")}`
-    );
-  }
-
-  // Process data rows
-  const dataRows = rows.slice(dataStartIndex);
-  console.log(`Processing ${dataRows.length} data rows`);
-
-  const validRows: ProcessedConnection[] = [];
-  let invalidRows = 0;
-
-  dataRows.forEach((row, index) => {
-    if (!row || row.every((cell) => !cell)) {
-      console.log(`Skipping empty row at index ${index}`);
-      return;
-    }
-
-    // Create row object with exact column names
-    const rowObj: any = {};
-    Object.entries(columnMap).forEach(([header, colIndex]) => {
-      const value = row[colIndex];
-      rowObj[header] = value ? normalizeHeader(value) : null;
-    });
-
-    // Validate and format
-    if (validateCSVRow(rowObj)) {
-      const formattedRow = formatRowForSupabase(rowObj, owner);
-      validRows.push(formattedRow);
-    } else {
-      invalidRows++;
-      console.warn(
-        `Invalid row at line ${index + dataStartIndex + 1}:`,
-        rowObj
+      console.log(
+        `✅ Batch ${batchNumber} complete: ${result.inserted_count} inserted, ${result.duplicate_count} duplicates`
       );
     }
+  } catch (error) {
+    manager.errorCount += batch.length;
+    console.error(`❌ Batch ${batchNumber} failed:`, error);
+
+    // Don't throw - continue processing other batches
+    // In production, you might want to implement retry logic here
+  }
+}
+
+/**
+ * Wait for a batch slot to become available
+ */
+async function waitForBatchSlot(manager: BatchManager): Promise<void> {
+  while (manager.activeBatches.size >= manager.maxConcurrency) {
+    // Wait for any batch to complete
+    await Promise.race(Array.from(manager.activeBatches));
+  }
+}
+
+/**
+ * Add a batch promise to the manager and handle its completion
+ */
+function addBatchToManager(
+  manager: BatchManager,
+  batchPromise: Promise<void>
+): void {
+  manager.activeBatches.add(batchPromise);
+
+  batchPromise.finally(() => {
+    manager.activeBatches.delete(batchPromise);
   });
+}
 
-  console.log(
-    `✅ Validation complete: ${validRows.length} valid, ${invalidRows} invalid from ${dataRows.length} total rows`
-  );
+/**
+ * Stream-based CSV validation and processing with proper concurrency control
+ */
+export async function validateAndProcessCSVStream(
+  stream: Readable,
+  owner: string,
+  batchSize: number,
+  maxConcurrency: number
+): Promise<{ processed: number; duplicates: number; total: number }> {
+  return new Promise((resolve, reject) => {
+    let totalRows = 0;
+    let validRows = 0;
+    let batch: ProcessedConnection[] = [];
+    let batchCounter = 0;
 
-  // Check for duplicates
-  console.log("🔍 Starting duplicate check...");
-  const duplicateResult = await checkForDuplicates(validRows);
+    const manager: BatchManager = {
+      activeBatches: new Set(),
+      maxConcurrency,
+      processedCount: 0,
+      duplicateCount: 0,
+      errorCount: 0,
+    };
 
-  return {
-    validRows,
-    uniqueRows: duplicateResult.uniqueRecords,
-    invalidRows,
-    duplicateRows: duplicateResult.duplicateCount,
-    totalRows: dataRows.length,
-    duplicateCheckSuccess: duplicateResult.success,
-    duplicateCheckMessage: duplicateResult.message,
-  };
+    const processBatchAsync = async (
+      batchToProcess: ProcessedConnection[]
+    ): Promise<void> => {
+      await waitForBatchSlot(manager);
+
+      const currentBatchNumber = ++batchCounter;
+      const batchPromise = processBatch(
+        batchToProcess,
+        currentBatchNumber,
+        manager
+      );
+
+      addBatchToManager(manager, batchPromise);
+    };
+
+    // Create streaming parser
+    const parser = Papa.parse(Papa.NODE_STREAM_INPUT, {
+      header: true,
+      skipEmptyLines: true,
+    });
+
+    parser.on("data", async (row: any) => {
+      totalRows++;
+
+      if (validateCSVRow(row)) {
+        validRows++;
+        const formattedRow = formatRowForSupabase(row, owner);
+        batch.push(formattedRow);
+
+        // Process batch when it reaches the target size
+        if (batch.length >= batchSize) {
+          const batchToProcess = [...batch];
+          batch = [];
+
+          try {
+            await processBatchAsync(batchToProcess);
+          } catch (error) {
+            console.error("Error processing batch:", error);
+            // Continue processing - don't fail the entire stream
+          }
+        }
+      }
+
+      // Log progress periodically
+      if (totalRows % 1000 === 0) {
+        console.log(
+          `📊 Progress: ${totalRows} rows processed, ${validRows} valid, ${manager.activeBatches.size} active batches`
+        );
+      }
+    });
+
+    parser.on("end", async () => {
+      try {
+        // Process any remaining batch
+        if (batch.length > 0) {
+          await processBatchAsync([...batch]);
+        }
+
+        // Wait for all remaining batches to complete
+        console.log(
+          `⏳ Waiting for ${manager.activeBatches.size} remaining batches to complete...`
+        );
+        await Promise.all(Array.from(manager.activeBatches));
+
+        console.log(
+          `🎉 Stream processing complete: ${totalRows} total rows, ${validRows} valid rows`
+        );
+        console.log(
+          `📊 Final results: ${manager.processedCount} inserted, ${manager.duplicateCount} duplicates, ${manager.errorCount} errors`
+        );
+
+        resolve({
+          processed: manager.processedCount,
+          duplicates: manager.duplicateCount,
+          total: validRows,
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    parser.on("error", (error: any) => {
+      console.error("CSV parsing error:", error);
+      reject(new ValidationError(`CSV parsing failed: ${error.message}`));
+    });
+
+    // Start processing
+    stream.pipe(parser);
+  });
 }
 
 /**
@@ -252,7 +338,7 @@ function isValidHeaderRow(row: string[] | any): boolean {
 /**
  * Find header row in CSV data (from working implementation)
  */
-function findHeaderRow(rows: string[][]): {
+export function findHeaderRow(rows: string[][]): {
   headerRow: string[];
   dataStartIndex: number;
 } {

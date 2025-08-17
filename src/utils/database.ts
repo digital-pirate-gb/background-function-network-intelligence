@@ -10,68 +10,105 @@ import {
   DatabaseError,
 } from "../types";
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelay: 1000, // 1 second
+  maxDelay: 10000, // 10 seconds
+  exponentialBackoff: true,
+};
+
 /**
- * Get the next queued job for processing
+ * Sleep utility for retry delays
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate retry delay with exponential backoff
+ */
+function calculateRetryDelay(attempt: number): number {
+  if (!RETRY_CONFIG.exponentialBackoff) {
+    return RETRY_CONFIG.baseDelay;
+  }
+
+  const delay = RETRY_CONFIG.baseDelay * Math.pow(2, attempt - 1);
+  return Math.min(delay, RETRY_CONFIG.maxDelay);
+}
+
+/**
+ * Retry wrapper for database operations
+ */
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  maxRetries: number = RETRY_CONFIG.maxRetries
+): Promise<T> {
+  let lastError: Error;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error as Error;
+
+      // Don't retry on certain types of errors
+      if (error instanceof DatabaseError && error.code === "VALIDATION_ERROR") {
+        throw error;
+      }
+
+      if (attempt === maxRetries) {
+        console.error(
+          `❌ ${operationName} failed after ${maxRetries} attempts:`,
+          lastError.message
+        );
+        throw lastError;
+      }
+
+      const delay = calculateRetryDelay(attempt);
+      console.warn(
+        `⚠️ ${operationName} attempt ${attempt} failed, retrying in ${delay}ms:`,
+        lastError.message
+      );
+      await sleep(delay);
+    }
+  }
+
+  throw lastError!;
+}
+
+/**
+ * Get the next queued job for processing with retry logic
  */
 export async function getNextJob(
   jobType: JobType = "csv_process"
 ): Promise<Job | null> {
-  try {
-    const { data, error } = await supabase.rpc("get_next_job", {
-      p_job_type: jobType,
-    });
+  return withRetry(
+    async () => {
+      const { data, error } = await supabase.rpc("get_next_job", {
+        p_job_type: jobType,
+      });
 
-    if (error) {
-      throw new DatabaseError(`Failed to get next job: ${error.message}`);
-    }
-
-    // If RPC returns a row with all null values, treat it as no job available
-    if (data && data.id === null) {
-      return null;
-    }
-
-    return data;
-  } catch (error) {
-    console.error("Error getting next job:", error);
-
-    // Fallback: Try direct query if RPC fails or doesn't exist
-    console.log("🔄 Falling back to direct job query...");
-    try {
-      const { data: jobs, error: queryError } = await supabase
-        .from("jobs")
-        .select("*")
-        .eq("type", jobType)
-        .eq("status", "queued")
-        .order("created_at", { ascending: true })
-        .limit(1);
-
-      if (queryError) {
-        throw new DatabaseError(
-          `Fallback job query failed: ${queryError.message}`
-        );
+      if (error) {
+        throw new DatabaseError(`Failed to get next job: ${error.message}`);
       }
 
-      if (!jobs || jobs.length === 0) {
-        console.log("📭 No queued jobs found in database");
+
+      // If RPC returns a row with all null values, treat it as no job available
+      if (data && data.id === null) {
         return null;
       }
 
-      const job = jobs[0];
-      console.log(`📋 Found queued job via direct query: ${job.id}`);
-
-      // Update job status to running (since RPC would have done this)
-      await updateJobProgress(job.id, "running", 0, null, true);
-
-      return job;
-    } catch (fallbackError) {
-      console.error("Fallback job query also failed:", fallbackError);
-      throw error; // Throw original error
-    }
-  }
+      return data;
+    },
+    "Get next job",
+    2
+  ); // Fewer retries for job polling
 }
 
 /**
- * Update job progress and status
+ * Update job progress and status with retry logic
  */
 export async function updateJobProgress(
   jobId: string,
@@ -80,7 +117,7 @@ export async function updateJobProgress(
   error: string | null = null,
   heartbeat: boolean = true
 ): Promise<Job> {
-  try {
+  return withRetry(async () => {
     const { data, error: updateError } = await supabase.rpc(
       "update_job_progress",
       {
@@ -100,14 +137,11 @@ export async function updateJobProgress(
     }
 
     return data;
-  } catch (error) {
-    console.error("Error updating job progress:", error);
-    throw error;
-  }
+  }, `Update job progress for ${jobId}`);
 }
 
 /**
- * Update upload status
+ * Update upload status with retry logic
  */
 export async function updateUploadStatus(
   uploadId: string,
@@ -115,7 +149,7 @@ export async function updateUploadStatus(
   bytesUploaded: number | null = null,
   error: string | null = null
 ): Promise<Upload> {
-  try {
+  return withRetry(async () => {
     const { data, error: updateError } = await supabase.rpc(
       "update_upload_status",
       {
@@ -135,10 +169,7 @@ export async function updateUploadStatus(
     }
 
     return data;
-  } catch (error) {
-    console.error("Error updating upload status:", error);
-    throw error;
-  }
+  }, `Update upload status for ${uploadId}`);
 }
 
 /**
@@ -168,125 +199,12 @@ export async function getUpload(uploadId: string): Promise<Upload> {
 }
 
 /**
- * Check for duplicate records using the existing RPC function
- */
-export async function checkForDuplicates(
-  records: ProcessedConnection[]
-): Promise<{
-  uniqueRecords: ProcessedConnection[];
-  duplicateCount: number;
-  success: boolean;
-  message: string;
-}> {
-  try {
-    console.log(`🔍 Checking ${records.length} records for duplicates...`);
-
-    if (!records || records.length === 0) {
-      return {
-        uniqueRecords: [],
-        duplicateCount: 0,
-        success: true,
-        message: "No records to check for duplicates.",
-      };
-    }
-
-    const profileUrls = [
-      ...new Set(records.map((r) => r["Profile URL"]).filter(Boolean)),
-    ];
-
-    if (profileUrls.length === 0) {
-      return {
-        uniqueRecords: records,
-        duplicateCount: 0,
-        success: true,
-        message: "No records with Profile URLs to check for duplicates.",
-      };
-    }
-
-    // Step 2: Fetch all existing connections in batches to avoid "414 Request-URI Too Large" error.
-    const BATCH_SIZE = 250; // Keep the URL length safely under server/proxy limits.
-    let allExistingRecords: { "Profile URL": string; Owner: string }[] = [];
-
-    console.log(
-      `⚡️ Fetching existing records in batches of ${BATCH_SIZE} to check for duplicates.`
-    );
-
-    for (let i = 0; i < profileUrls.length; i += BATCH_SIZE) {
-      const batch = profileUrls.slice(i, i + BATCH_SIZE);
-
-      const { data: batchResult, error } = await supabase
-        .from("linkedin_connections")
-        .select('"Profile URL", Owner')
-        .in("Profile URL", batch);
-
-      if (error) {
-        console.error(
-          `Error fetching duplicate check batch (starting at index ${i}):`,
-          error
-        );
-        throw new DatabaseError(
-          `Failed to query for duplicates in a batch: ${error.message}`
-        );
-      }
-
-      if (batchResult) {
-        allExistingRecords = allExistingRecords.concat(batchResult);
-      }
-    }
-
-    // Step 3: Create a Set of existing records for fast lookups.
-    // Use only Profile URL for global deduplication (same LinkedIn profile can't exist twice)
-    const existingSet = new Set(
-      allExistingRecords.map((r) => r["Profile URL"]?.toLowerCase())
-    );
-
-    // Step 4: Partition the incoming records into unique and duplicate arrays.
-    const uniqueRecords: ProcessedConnection[] = [];
-    const duplicateRecords: ProcessedConnection[] = [];
-
-    for (const record of records) {
-      // Check only Profile URL for global deduplication
-      const profileUrl = record["Profile URL"]?.toLowerCase();
-      if (existingSet.has(profileUrl)) {
-        duplicateRecords.push(record);
-      } else {
-        uniqueRecords.push(record);
-        // Add the new record to the set to handle duplicates within the CSV file itself.
-        existingSet.add(profileUrl);
-      }
-    }
-
-    const duplicateCount = duplicateRecords.length;
-    const message = `Duplicate check complete. Found ${uniqueRecords.length} new records and ${duplicateCount} duplicates.`;
-
-    console.log(`✅ ${message}`);
-
-    return {
-      uniqueRecords,
-      duplicateCount,
-      success: true,
-      message,
-    };
-  } catch (error) {
-    console.error("Error in checkForDuplicates:", error);
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
-    return {
-      uniqueRecords: records, // Fallback: return all records if the check fails.
-      duplicateCount: 0,
-      success: false,
-      message: `Duplicate check failed: ${errorMessage}`,
-    };
-  }
-}
-
-/**
- * Batch insert LinkedIn connections (adapted from existing logic)
+ * Batch insert LinkedIn connections with retry logic and better error handling
  */
 export async function batchInsertConnections(
   connections: ProcessedConnection[]
 ): Promise<BatchProcessResult[]> {
-  try {
+  return withRetry(async () => {
     const { data, error } = await supabase.rpc("process_connections_batch", {
       records: connections,
     });
@@ -297,11 +215,8 @@ export async function batchInsertConnections(
       );
     }
 
-    return data;
-  } catch (error) {
-    console.error("Error inserting connections batch:", error);
-    throw error;
-  }
+    return data || [];
+  }, `Batch insert of ${connections.length} connections`);
 }
 
 /**

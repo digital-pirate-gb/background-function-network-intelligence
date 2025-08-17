@@ -60,7 +60,7 @@ export interface LinkedInConnection {
   "Connected On"?: string;
 }
 
-export interface ProcessedConnection {
+export type ProcessedConnection = {
   Name: string;
   "Profile URL": string;
   Owner: string;
@@ -68,7 +68,8 @@ export interface ProcessedConnection {
   Company: string | null;
   Title: string | null;
   "Connected On": string | null;
-}
+  url_hash: string;
+};
 
 export interface BatchProcessResult {
   inserted_count: number;
