@@ -183,7 +183,9 @@ export function formatRowForSupabase(
 async function processBatch(
   batch: ProcessedConnection[],
   batchNumber: number,
-  manager: BatchManager
+  manager: BatchManager,
+  onProgress?: (progress: number) => Promise<void>,
+  estimatedTotalBatches?: number
 ): Promise<void> {
   if (batch.length === 0) return;
 
@@ -200,6 +202,25 @@ async function processBatch(
       console.log(
         `✅ Batch ${batchNumber} complete: ${result.inserted_count} inserted, ${result.duplicate_count} duplicates`
       );
+    }
+
+    // Update progress (debounced to avoid too many DB calls)
+    if (onProgress && estimatedTotalBatches) {
+      const PROGRESS_UPDATE_INTERVAL = 5; // Update every 5 batches
+      if (batchNumber % PROGRESS_UPDATE_INTERVAL === 0) {
+        // Ensure progress stays within 10-90% range during processing
+        const progress = Math.min(
+          Math.max(
+            Math.floor((batchNumber / estimatedTotalBatches) * 80) + 10,
+            10
+          ),
+          90
+        );
+        // Fire and forget - don't wait for progress update
+        onProgress(progress).catch((err) =>
+          console.warn("Progress update failed:", err)
+        );
+      }
     }
   } catch (error) {
     manager.errorCount += batch.length;
@@ -313,7 +334,8 @@ export async function validateAndProcessCSVStream(
   stream: Readable,
   owner: string,
   batchSize: number,
-  maxConcurrency: number
+  maxConcurrency: number,
+  onProgress?: (progress: number) => Promise<void>
 ): Promise<{ processed: number; duplicates: number; total: number }> {
   try {
     // First, preprocess the CSV to skip notes section and find proper headers
@@ -330,6 +352,23 @@ export async function validateAndProcessCSVStream(
       let batch: ProcessedConnection[] = [];
       let batchCounter = 0;
       let headerLogged = false;
+
+      // Estimate total batches based on file size and batch size
+      const estimatedRows = Math.ceil(preprocessedCSV.length / 200); // Rough estimate: ~200 chars per row
+      const estimatedTotalBatches = Math.max(
+        Math.ceil(estimatedRows / batchSize),
+        1
+      ); // Ensure at least 1 batch
+      console.log(
+        `📊 Estimated ${estimatedRows} rows, ${estimatedTotalBatches} batches`
+      );
+
+      // Initial progress update (0-10%)
+      if (onProgress) {
+        onProgress(10).catch((err) =>
+          console.warn("Initial progress update failed:", err)
+        );
+      }
 
       const manager: BatchManager = {
         activeBatches: new Set(),
@@ -348,7 +387,9 @@ export async function validateAndProcessCSVStream(
         const batchPromise = processBatch(
           batchToProcess,
           currentBatchNumber,
-          manager
+          manager,
+          onProgress,
+          estimatedTotalBatches
         );
 
         addBatchToManager(manager, batchPromise);
@@ -411,6 +452,13 @@ export async function validateAndProcessCSVStream(
             `⏳ Waiting for ${manager.activeBatches.size} remaining batches to complete...`
           );
           await Promise.all(Array.from(manager.activeBatches));
+
+          // Final progress update (90-100%)
+          if (onProgress) {
+            onProgress(90).catch((err) =>
+              console.warn("Final progress update failed:", err)
+            );
+          }
 
           console.log(
             `🎉 Stream processing complete: ${totalRows} total rows, ${validRows} valid rows`

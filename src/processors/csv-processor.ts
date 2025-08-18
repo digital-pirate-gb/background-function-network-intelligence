@@ -63,7 +63,10 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
       csvStream,
       upload.user_id,
       BATCH_SIZE,
-      CONCURRENT_BATCHES
+      CONCURRENT_BATCHES,
+      async (progress) => {
+        await updateJobProgress(job.id, "running", progress, null, true);
+      }
     );
 
     console.log(
