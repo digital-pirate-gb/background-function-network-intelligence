@@ -36,6 +36,7 @@ export interface Job {
   last_heartbeat_at?: string;
   progress: number;
   error?: string;
+  result?: any;
   created_at: string;
   updated_at: string;
 }

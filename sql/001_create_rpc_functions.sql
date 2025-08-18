@@ -12,6 +12,7 @@ RETURNS TABLE (
   last_heartbeat_at timestamptz,
   progress int,
   error text,
+  result jsonb,
   created_at timestamptz,
   updated_at timestamptz
 )
@@ -50,6 +51,7 @@ BEGIN
       job_record.last_heartbeat_at,
       job_record.progress,
       job_record.error,
+      job_record.result,
       job_record.created_at,
       job_record.updated_at;
   ELSE
@@ -64,6 +66,7 @@ BEGIN
       NULL::timestamptz,
       NULL::int,
       NULL::text,
+      NULL::jsonb,
       NULL::timestamptz,
       NULL::timestamptz;
   END IF;
@@ -76,7 +79,8 @@ CREATE OR REPLACE FUNCTION update_job_progress(
   p_status text DEFAULT NULL,
   p_progress int DEFAULT NULL,
   p_error text DEFAULT NULL,
-  p_heartbeat boolean DEFAULT true
+  p_heartbeat boolean DEFAULT true,
+  p_result jsonb DEFAULT NULL
 )
 RETURNS TABLE (
   id text,
@@ -87,6 +91,7 @@ RETURNS TABLE (
   last_heartbeat_at timestamptz,
   progress int,
   error text,
+  result jsonb,
   created_at timestamptz,
   updated_at timestamptz
 )
@@ -104,6 +109,10 @@ BEGIN
       WHEN p_error IS NOT NULL THEN p_error
       WHEN p_status = 'succeeded' THEN NULL
       ELSE error
+    END,
+    result = CASE
+      WHEN p_result IS NOT NULL THEN p_result
+      ELSE result
     END,
     updated_at = NOW(),
     last_heartbeat_at = CASE
@@ -131,6 +140,7 @@ BEGIN
     job_record.last_heartbeat_at,
     job_record.progress,
     job_record.error,
+    job_record.result,
     job_record.created_at,
     job_record.updated_at;
 END;
@@ -259,12 +269,12 @@ $$;
 
 -- Grant execute permissions to authenticated users
 GRANT EXECUTE ON FUNCTION get_next_job(text) TO authenticated;
-GRANT EXECUTE ON FUNCTION update_job_progress(text, text, int, text, boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION update_job_progress(text, text, int, text, boolean, jsonb) TO authenticated;
 GRANT EXECUTE ON FUNCTION update_upload_status(text, text, bigint, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION process_connections_batch(jsonb) TO authenticated;
 
 -- Grant execute permissions to service_role (for the worker)
 GRANT EXECUTE ON FUNCTION get_next_job(text) TO service_role;
-GRANT EXECUTE ON FUNCTION update_job_progress(text, text, int, text, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION update_job_progress(text, text, int, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION update_upload_status(text, text, bigint, text) TO service_role;
 GRANT EXECUTE ON FUNCTION process_connections_batch(jsonb) TO service_role;

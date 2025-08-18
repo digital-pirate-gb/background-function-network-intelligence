@@ -94,7 +94,6 @@ export async function getNextJob(
         throw new DatabaseError(`Failed to get next job: ${error.message}`);
       }
 
-
       // If RPC returns a row with all null values, treat it as no job available
       if (data && data.id === null) {
         return null;
@@ -115,7 +114,8 @@ export async function updateJobProgress(
   status: JobStatus | null = null,
   progress: number | null = null,
   error: string | null = null,
-  heartbeat: boolean = true
+  heartbeat: boolean = true,
+  result: any = null
 ): Promise<Job> {
   return withRetry(async () => {
     const { data, error: updateError } = await supabase.rpc(
@@ -126,6 +126,7 @@ export async function updateJobProgress(
         p_progress: progress,
         p_error: error,
         p_heartbeat: heartbeat,
+        p_result: result,
       }
     );
 

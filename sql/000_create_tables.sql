@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_heartbeat_at timestamptz,
   progress int NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
   error text,
+  result jsonb,
   created_at timestamptz NOT NULL DEFAULT NOW(),
   updated_at timestamptz NOT NULL DEFAULT NOW()
 );

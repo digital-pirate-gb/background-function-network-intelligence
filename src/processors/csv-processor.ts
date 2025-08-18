@@ -82,7 +82,12 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
     );
 
     // Mark job as succeeded
-    await updateJobProgress(job.id, "succeeded", 100, null, true);
+    await updateJobProgress(job.id, "succeeded", 100, null, true, {
+      processedRecords: processingResult.processed,
+      duplicateRecords: processingResult.duplicates,
+      totalRecords: processingResult.total,
+      success: true,
+    });
 
     // Clean up storage chunks
     console.log("🧹 Cleaning up storage chunks...");
