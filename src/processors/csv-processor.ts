@@ -66,7 +66,8 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
       CONCURRENT_BATCHES,
       async (progress) => {
         await updateJobProgress(job.id, "running", progress, null, true);
-      }
+      },
+      upload.bytes_total // Pass file size for Phase 1 optimizations
     );
 
     console.log(

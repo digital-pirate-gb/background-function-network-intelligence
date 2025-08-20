@@ -1,5 +1,6 @@
 import { Readable } from "stream";
 import * as Papa from "papaparse";
+import * as fastCsv from "fast-csv";
 import {
   LinkedInConnection,
   ProcessedConnection,
@@ -15,6 +16,29 @@ interface BatchManager {
   processedCount: number;
   duplicateCount: number;
   errorCount: number;
+}
+
+/**
+ * Calculate optimal batch size based on file size
+ */
+function calculateOptimalBatchSize(fileSizeBytes: number): number {
+  if (fileSizeBytes < 10 * 1024 * 1024) return 500; // < 10MB
+  if (fileSizeBytes < 100 * 1024 * 1024) return 1000; // < 100MB
+  if (fileSizeBytes < 1024 * 1024 * 1024) return 2000; // < 1GB
+  return 5000; // > 1GB
+}
+
+/**
+ * Calculate optimal concurrency based on file size
+ */
+function calculateOptimalConcurrency(fileSizeBytes: number): number {
+  const cpuCores = require("os").cpus().length;
+  const baseConcurrency = Math.min(cpuCores * 2, 8);
+
+  if (fileSizeBytes > 100 * 1024 * 1024) {
+    return Math.min(baseConcurrency * 1.5, 12);
+  }
+  return baseConcurrency;
 }
 
 /**
@@ -126,8 +150,12 @@ export function validateCSVRow(row: any): row is LinkedInConnection {
  * - Converts to lowercase.
  * - Removes trailing slashes.
  * - Computes a SHA-256 hash.
+ * - Uses job-scoped caching for performance.
  */
-export function normalizeAndHashUrl(url: string): {
+export function normalizeAndHashUrl(
+  url: string,
+  hashCache?: Map<string, string>
+): {
   normalizedUrl: string;
   hash: string;
 } {
@@ -135,7 +163,20 @@ export function normalizeAndHashUrl(url: string): {
     return { normalizedUrl: "", hash: "" };
   }
   const normalized = url.toLowerCase().trim().replace(/\/$/, "");
+
+  // Use cache if provided
+  if (hashCache && hashCache.has(normalized)) {
+    return { normalizedUrl: normalized, hash: hashCache.get(normalized)! };
+  }
+
+  // Compute hash
   const hash = createHash("sha256").update(normalized).digest("hex");
+
+  // Cache if provided
+  if (hashCache) {
+    hashCache.set(normalized, hash);
+  }
+
   return { normalizedUrl: normalized, hash };
 }
 
@@ -145,7 +186,8 @@ export function normalizeAndHashUrl(url: string): {
  */
 export function formatRowForSupabase(
   row: any,
-  owner: string
+  owner: string,
+  hashCache?: Map<string, string>
 ): ProcessedConnection {
   // Get values using flexible header matching
   const firstName = getRowValue(row, "First Name");
@@ -163,7 +205,7 @@ export function formatRowForSupabase(
     .filter(Boolean)
     .join(" ");
 
-  const { normalizedUrl, hash } = normalizeAndHashUrl(url);
+  const { normalizedUrl, hash } = normalizeAndHashUrl(url, hashCache);
 
   return {
     Name: fullName,
@@ -206,7 +248,7 @@ async function processBatch(
 
     // Update progress (debounced to avoid too many DB calls)
     if (onProgress && estimatedTotalBatches) {
-      const PROGRESS_UPDATE_INTERVAL = 5; // Update every 5 batches
+      const PROGRESS_UPDATE_INTERVAL = 10; // Update every 10 batches (optimized from 5)
       if (batchNumber % PROGRESS_UPDATE_INTERVAL === 0) {
         // Ensure progress stays within 10-90% range during processing
         const progress = Math.min(
@@ -329,15 +371,33 @@ async function preprocessCSVStream(stream: Readable): Promise<string> {
 
 /**
  * Stream-based CSV validation and processing with proper concurrency control
+ * Optimized with Phase 1 & 2 improvements: hash caching, dynamic batch sizing, fast-csv parser
  */
 export async function validateAndProcessCSVStream(
   stream: Readable,
   owner: string,
   batchSize: number,
   maxConcurrency: number,
-  onProgress?: (progress: number) => Promise<void>
+  onProgress?: (progress: number) => Promise<void>,
+  fileSizeBytes?: number
 ): Promise<{ processed: number; duplicates: number; total: number }> {
   try {
+    // Phase 1 Optimization: Dynamic batch sizing based on file size
+    const optimizedBatchSize = fileSizeBytes
+      ? calculateOptimalBatchSize(fileSizeBytes)
+      : batchSize;
+    const optimizedConcurrency = fileSizeBytes
+      ? calculateOptimalConcurrency(fileSizeBytes)
+      : maxConcurrency;
+
+    console.log(
+      `🚀 Phase 1 & 2 Optimizations: batchSize=${optimizedBatchSize}, concurrency=${optimizedConcurrency}, parser=fast-csv`
+    );
+
+    // Create job-scoped hash cache for performance
+    const jobHashCache = new Map<string, string>();
+
+    // Phase 2 Optimization: Use fast-csv for better performance
     // First, preprocess the CSV to skip notes section and find proper headers
     console.log("🔍 Preprocessing CSV to find proper headers...");
     const preprocessedCSV = await preprocessCSVStream(stream);
@@ -353,14 +413,14 @@ export async function validateAndProcessCSVStream(
       let batchCounter = 0;
       let headerLogged = false;
 
-      // Estimate total batches based on file size and batch size
+      // Estimate total batches based on file size and optimized batch size
       const estimatedRows = Math.ceil(preprocessedCSV.length / 200); // Rough estimate: ~200 chars per row
       const estimatedTotalBatches = Math.max(
-        Math.ceil(estimatedRows / batchSize),
+        Math.ceil(estimatedRows / optimizedBatchSize),
         1
       ); // Ensure at least 1 batch
       console.log(
-        `📊 Estimated ${estimatedRows} rows, ${estimatedTotalBatches} batches`
+        `📊 Estimated ${estimatedRows} rows, ${estimatedTotalBatches} batches (optimized batch size: ${optimizedBatchSize})`
       );
 
       // Initial progress update (0-10%)
@@ -372,7 +432,7 @@ export async function validateAndProcessCSVStream(
 
       const manager: BatchManager = {
         activeBatches: new Set(),
-        maxConcurrency,
+        maxConcurrency: optimizedConcurrency,
         processedCount: 0,
         duplicateCount: 0,
         errorCount: 0,
@@ -395,14 +455,12 @@ export async function validateAndProcessCSVStream(
         addBatchToManager(manager, batchPromise);
       };
 
-      // Create streaming parser with proper headers
-      const parser = Papa.parse(Papa.NODE_STREAM_INPUT, {
-        header: true,
-        skipEmptyLines: true,
-        transformHeader: (header: string) => {
-          // Clean up header names
-          return header.trim().replace(/^\uFEFF/, "");
-        },
+      // Phase 2 Optimization: Use fast-csv parser for better performance
+      const parser = fastCsv.parse({
+        headers: true,
+        maxRows: 0, // No limit
+        strictColumnHandling: false,
+        ignoreEmpty: true,
       });
 
       parser.on("data", async (row: any) => {
@@ -415,11 +473,11 @@ export async function validateAndProcessCSVStream(
 
         if (validateCSVRow(row)) {
           validRows++;
-          const formattedRow = formatRowForSupabase(row, owner);
+          const formattedRow = formatRowForSupabase(row, owner, jobHashCache);
           batch.push(formattedRow);
 
-          // Process batch when it reaches the target size
-          if (batch.length >= batchSize) {
+          // Process batch when it reaches the optimized target size
+          if (batch.length >= optimizedBatchSize) {
             const batchToProcess = [...batch];
             batch = [];
 
@@ -427,7 +485,7 @@ export async function validateAndProcessCSVStream(
               await processBatchAsync(batchToProcess);
             } catch (error) {
               console.error("Error processing batch:", error);
-              // Continue processing - don't fail the entire stream
+
             }
           }
         }
@@ -437,8 +495,7 @@ export async function validateAndProcessCSVStream(
           console.log(
             `📊 Progress: ${totalRows} rows processed, ${validRows} valid, ${manager.activeBatches.size} active batches`
           );
-        }
-      });
+        }      });
 
       parser.on("end", async () => {
         try {
@@ -478,8 +535,93 @@ export async function validateAndProcessCSVStream(
       });
 
       parser.on("error", (error: any) => {
-        console.error("CSV parsing error:", error);
-        reject(new ValidationError(`CSV parsing failed: ${error.message}`));
+        console.error("Fast-CSV parsing error:", error);
+        console.log("🔄 Falling back to PapaParse parser...");
+
+        // Fallback to PapaParse if fast-csv fails
+        try {
+          const fallbackParser = Papa.parse(Papa.NODE_STREAM_INPUT, {
+            header: true,
+            skipEmptyLines: true,
+            transformHeader: (header: string) => {
+              return header.trim().replace(/^\uFEFF/, "");
+            },
+          });
+
+          // Re-pipe the stream to fallback parser
+          preprocessedStream.pipe(fallbackParser);
+
+          fallbackParser.on("data", async (row: any) => {
+            // Same processing logic as above
+            totalRows++;
+            if (!headerLogged) {
+              headerLogged = true;
+            }
+            if (validateCSVRow(row)) {
+              validRows++;
+              const formattedRow = formatRowForSupabase(
+                row,
+                owner,
+                jobHashCache
+              );
+              batch.push(formattedRow);
+              if (batch.length >= optimizedBatchSize) {
+                const batchToProcess = [...batch];
+                batch = [];
+                try {
+                  await processBatchAsync(batchToProcess);
+                } catch (batchError) {
+                  console.error("Error processing batch:", batchError);
+                }
+              }
+            }
+            if (totalRows % 1000 === 0) {
+              console.log(
+                `📊 Progress: ${totalRows} rows processed, ${validRows} valid, ${manager.activeBatches.size} active batches`
+              );
+            }
+          });
+
+          fallbackParser.on("end", async () => {
+            // Same end logic as above
+            try {
+              if (batch.length > 0) {
+                await processBatchAsync([...batch]);
+              }
+              await Promise.all(Array.from(manager.activeBatches));
+              if (onProgress) {
+                onProgress(90).catch((err) =>
+                  console.warn("Final progress update failed:", err)
+                );
+              }
+              console.log(
+                `🎉 Stream processing complete: ${totalRows} total rows, ${validRows} valid rows`
+              );
+              console.log(
+                `📊 Final results: ${manager.processedCount} inserted, ${manager.duplicateCount} duplicates, ${manager.errorCount} errors`
+              );
+              resolve({
+                processed: manager.processedCount,
+                duplicates: manager.duplicateCount,
+                total: validRows,
+              });
+            } catch (endError) {
+              reject(endError);
+            }
+          });
+
+          fallbackParser.on("error", (fallbackError: any) => {
+            console.error("PapaParse fallback also failed:", fallbackError);
+            reject(
+              new ValidationError(
+                `CSV parsing failed with both parsers: ${error.message}`
+              )
+            );
+          });
+        } catch (fallbackSetupError) {
+          console.error("Failed to setup fallback parser:", fallbackSetupError);
+          reject(new ValidationError(`CSV parsing failed: ${error.message}`));
+        }
       });
 
       // Start processing the preprocessed stream
