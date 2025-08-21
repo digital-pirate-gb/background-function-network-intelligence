@@ -1,21 +1,19 @@
-import { Job, JobResult, WorkerError, ValidationError } from "../types";
+import { Job, JobResult, ValidationError } from "../types";
 import {
   updateJobProgress,
   updateUploadStatus,
   getUpload,
-  batchInsertConnections,
   markJobFailed,
 } from "../utils/database";
 import { downloadChunksAsStream, cleanupUploadChunks } from "../utils/storage";
-import {
-  validateAndProcessCSVData,
-  sanitizeCSVData,
-  getValidationSummary,
-} from "../utils/validation";
+import { validateAndProcessCSVStream } from "../utils/validation";
 
 const BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE || "1000");
 const HEARTBEAT_INTERVAL = parseInt(
   process.env.WORKER_HEARTBEAT_INTERVAL || "30000"
+);
+const CONCURRENT_BATCHES = parseInt(
+  process.env.WORKER_CONCURRENT_BATCHES || "5"
 );
 
 /**
@@ -54,94 +52,27 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
 
     // Download and combine chunks from storage
     console.log("📥 Downloading CSV chunks from storage...");
-    const csvData = await downloadChunksAsStream(
+    const csvStream = await downloadChunksAsStream(
       job.upload_id,
       upload.filename
     );
 
-    // Sanitize CSV data
-    const sanitizedData = sanitizeCSVData(csvData);
-    console.log(`🧹 Sanitized CSV data (${sanitizedData.length} characters)`);
-
     // Validate and process rows with duplicate checking
     console.log("✅ Validating and processing rows...");
-    const processingResult = await validateAndProcessCSVData(
-      sanitizedData,
-      upload.user_id
+    const processingResult = await validateAndProcessCSVStream(
+      csvStream,
+      upload.user_id,
+      BATCH_SIZE,
+      CONCURRENT_BATCHES,
+      async (progress) => {
+        await updateJobProgress(job.id, "running", progress, null, true);
+      },
+      upload.bytes_total // Pass file size for Phase 1 optimizations
     );
-
-    console.log(getValidationSummary(processingResult));
-
-    // Check if we have any unique records to process
-    if (processingResult.uniqueRows.length === 0) {
-      if (processingResult.duplicateRows > 0) {
-        throw new ValidationError(
-          "All records are duplicates. No new data to process."
-        );
-      } else {
-        throw new ValidationError("No valid rows found in CSV data");
-      }
-    }
-
-    // Use unique rows for processing (after duplicate removal)
-    const validRows = processingResult.uniqueRows;
-
-    // Update progress with total count
-    await updateJobProgress(job.id, "running", 0, null, true);
-
-    let processedCount = 0;
-    const totalValidRows = validRows.length;
-    const totalDuplicates = processingResult.duplicateRows;
 
     console.log(
-      `🔄 Processing ${totalValidRows} unique rows in batches of ${BATCH_SIZE} (${totalDuplicates} duplicates already filtered out)`
+      `📊 Final results: ${processingResult.processed} inserted, ${processingResult.duplicates} duplicates, ${processingResult.total} total valid rows`
     );
-
-    for (let i = 0; i < validRows.length; i += BATCH_SIZE) {
-      const batch = validRows.slice(i, i + BATCH_SIZE);
-      const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-      const totalBatches = Math.ceil(validRows.length / BATCH_SIZE);
-
-      console.log(
-        `📦 Processing batch ${batchNumber}/${totalBatches}: ${batch.length} records`
-      );
-
-      try {
-        // Insert batch using existing RPC function
-        const batchResults = await batchInsertConnections(batch);
-
-        if (batchResults && batchResults.length > 0) {
-          const { inserted_count } = batchResults[0];
-          processedCount += inserted_count;
-        }
-
-        // Calculate and update progress
-        const progressPercentage = Math.round(
-          (processedCount * 100) / totalValidRows
-        );
-        await updateJobProgress(
-          job.id,
-          "running",
-          progressPercentage,
-          null,
-          true
-        );
-
-        console.log(
-          `✅ Batch ${batchNumber} complete. Progress: ${processedCount}/${totalValidRows} (${progressPercentage}%)`
-        );
-      } catch (batchError) {
-        console.error(`❌ Batch ${batchNumber} failed:`, batchError);
-        const errorMessage =
-          batchError instanceof Error ? batchError.message : String(batchError);
-        throw new WorkerError(
-          `Batch processing failed: ${errorMessage}`,
-          "BATCH_ERROR",
-          job.id,
-          job.upload_id
-        );
-      }
-    }
 
     // Final progress update
     await updateJobProgress(job.id, "running", 100, null, true);
@@ -155,7 +86,12 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
     );
 
     // Mark job as succeeded
-    await updateJobProgress(job.id, "succeeded", 100, null, true);
+    await updateJobProgress(job.id, "succeeded", 100, null, true, {
+      processedRecords: processingResult.processed,
+      duplicateRecords: processingResult.duplicates,
+      totalRecords: processingResult.total,
+      success: true,
+    });
 
     // Clean up storage chunks
     console.log("🧹 Cleaning up storage chunks...");
@@ -163,15 +99,12 @@ export async function processCSVJob(job: Job): Promise<JobResult> {
 
     const duration = Date.now() - startTime;
     console.log(`🎉 CSV processing completed successfully in ${duration}ms`);
-    console.log(
-      `📊 Final results: ${processedCount} inserted, ${totalDuplicates} duplicates, ${totalValidRows} total unique rows`
-    );
 
     return {
       success: true,
-      processedRecords: processedCount,
-      duplicateRecords: totalDuplicates,
-      totalRecords: totalValidRows,
+      processedRecords: processingResult.processed,
+      duplicateRecords: processingResult.duplicates,
+      totalRecords: processingResult.total,
     };
   } catch (error) {
     const duration = Date.now() - startTime;

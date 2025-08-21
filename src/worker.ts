@@ -43,32 +43,32 @@ const config: WorkerConfig = {
 let lastCleanup = Date.now();
 const POLL_BACKOFF_MS = 2000; // backoff when malformed or empty job polled
 
-/**
- * Create a redacted snapshot of a polled job for safe logging (no PII)
- */
-function sanitizeJobForLogging(job: any) {
-  if (!job) return null;
-  const allowedKeys = [
-    "id",
-    "upload_id",
-    "type",
-    "status",
-    "attempts",
-    "last_heartbeat_at",
-    "progress",
-    "created_at",
-    "updated_at",
-  ];
-  const snapshot: Record<string, any> = {};
-  for (const k of allowedKeys) {
-    if (k in job) snapshot[k] = job[k];
-  }
-  // Indicate presence of error without revealing its content
-  snapshot.hasError = !!(job as any).error;
-  // Include top-level keys so developer sees structure without values
-  snapshot.keys = Object.keys(job);
-  return snapshot;
-}
+// /**
+//  * Create a redacted snapshot of a polled job for safe logging (no PII)
+//  */
+// function sanitizeJobForLogging(job: any) {
+//   if (!job) return null;
+//   const allowedKeys = [
+//     "id",
+//     "upload_id",
+//     "type",
+//     "status",
+//     "attempts",
+//     "last_heartbeat_at",
+//     "progress",
+//     "created_at",
+//     "updated_at",
+//   ];
+//   const snapshot: Record<string, any> = {};
+//   for (const k of allowedKeys) {
+//     if (k in job) snapshot[k] = job[k];
+//   }
+//   // Indicate presence of error without revealing its content
+//   snapshot.hasError = !!(job as any).error;
+//   // Include top-level keys so developer sees structure without values
+//   snapshot.keys = Object.keys(job);
+//   return snapshot;
+// }
 
 /**
  * Main worker loop
@@ -89,9 +89,6 @@ async function workerLoop(): Promise<void> {
         await sleep(config.pollInterval);
         continue;
       }
-
-      // Log a redacted snapshot of the polled job to aid debugging (no PII)
-      console.log("🔎 Polled job snapshot:", sanitizeJobForLogging(job));
 
       // Defensive checks: ensure required fields are present and not null
       if (

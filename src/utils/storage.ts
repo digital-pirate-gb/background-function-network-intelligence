@@ -1,5 +1,6 @@
 import { supabase } from "../config/supabase";
 import { StorageError, StorageChunk } from "../types";
+import { Readable } from "stream";
 
 const STORAGE_BUCKET = process.env.STORAGE_BUCKET || "csv-uploads";
 
@@ -54,57 +55,120 @@ export async function getUploadChunks(
 }
 
 /**
- * Download and combine chunks into a readable stream
+ * Download and combine chunks into a readable stream with proper backpressure
  */
 export async function downloadChunksAsStream(
   uploadId: string,
   filename: string
-): Promise<string> {
+): Promise<Readable> {
   try {
     const chunks = await getUploadChunks(uploadId, filename);
-    let combinedData = "";
 
     console.log(
       `📥 Downloading ${chunks.length} chunks for upload ${uploadId}`
     );
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      console.log(
-        `📄 Downloading chunk ${i + 1}/${chunks.length}: ${chunk.path}`
-      );
+    let currentChunkIndex = 0;
+    let isReading = false;
+    let streamEnded = false;
 
-      const { data, error } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .download(chunk.path);
+    const stream = new Readable({
+      async read() {
+        // Prevent concurrent reads
+        if (isReading || streamEnded || currentChunkIndex >= chunks.length) {
+          return;
+        }
 
-      if (error) {
-        throw new StorageError(
-          `Failed to download chunk ${chunk.path}: ${error.message}`,
-          undefined,
-          uploadId
-        );
-      }
+        isReading = true;
 
-      if (!data) {
-        throw new StorageError(
-          `No data received for chunk ${chunk.path}`,
-          undefined,
-          uploadId
-        );
-      }
+        try {
+          while (currentChunkIndex < chunks.length && !streamEnded) {
+            const chunk = chunks[currentChunkIndex];
+            console.log(
+              `📄 Downloading chunk ${currentChunkIndex + 1}/${
+                chunks.length
+              }: ${chunk.path}`
+            );
 
-      // Convert blob to text
-      const chunkText = await data.text();
-      combinedData += chunkText;
-    }
+            const { data, error } = await supabase.storage
+              .from(STORAGE_BUCKET)
+              .download(chunk.path);
 
-    console.log(
-      `✅ Successfully combined ${chunks.length} chunks (${combinedData.length} characters)`
-    );
-    return combinedData;
+            if (error) {
+              this.emit(
+                "error",
+                new StorageError(
+                  `Failed to download chunk ${chunk.path}: ${error.message}`,
+                  undefined,
+                  uploadId
+                )
+              );
+              return;
+            }
+
+            if (!data) {
+              this.emit(
+                "error",
+                new StorageError(
+                  `No data received for chunk ${chunk.path}`,
+                  undefined,
+                  uploadId
+                )
+              );
+              return;
+            }
+
+            // Convert blob to buffer in smaller chunks to manage memory
+            const buffer = Buffer.from(await data.arrayBuffer());
+
+            // Push data in smaller chunks to handle backpressure
+            const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+            let offset = 0;
+
+            while (offset < buffer.length && !streamEnded) {
+              const end = Math.min(offset + CHUNK_SIZE, buffer.length);
+              const subChunk = buffer.subarray(offset, end);
+
+              // If push returns false, the internal buffer is full
+              if (!this.push(subChunk)) {
+                // Stream will call _read again when ready
+                currentChunkIndex++;
+                offset = end;
+                isReading = false;
+                return;
+              }
+
+              offset = end;
+            }
+
+            currentChunkIndex++;
+          }
+
+          // End the stream if we've processed all chunks
+          if (currentChunkIndex >= chunks.length) {
+            streamEnded = true;
+            this.push(null);
+          }
+        } catch (error) {
+          this.emit(
+            "error",
+            new StorageError(
+              `Error processing chunk: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              undefined,
+              uploadId
+            )
+          );
+        } finally {
+          isReading = false;
+        }
+      },
+    });
+
+    return stream;
   } catch (error) {
-    console.error("Error downloading chunks as stream:", error);
+    console.error("Error preparing chunks for stream:", error);
     throw error;
   }
 }
